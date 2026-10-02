@@ -31,7 +31,7 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
-  const [sortBy, setSortBy] = useState<'rating' | 'newest'>('rating');
+  const [sortBy, setSortBy] = useState<'recommended' | 'newest'>('recommended');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Categories list
@@ -47,6 +47,7 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
   const visiblePrograms = useMemo(() => {
     return programs
       .filter(p => {
+        if (p.status !== 'active') return false;
         const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
         const matchesSearch =
           p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -57,10 +58,10 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
         return matchesCategory && matchesSearch;
       })
       .sort((a, b) => {
-        if (sortBy === 'rating') {
+        if (sortBy === 'recommended') {
           if (a.featured && !b.featured) return -1;
           if (!a.featured && b.featured) return 1;
-          return b.ai_generated_pick.localeCompare(a.ai_generated_pick);
+          return a.name.localeCompare(b.name);
         }
         return new Date(b.date_added).getTime() - new Date(a.date_added).getTime();
       });

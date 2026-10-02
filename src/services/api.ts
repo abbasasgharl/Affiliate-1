@@ -216,15 +216,6 @@ export const api = {
       };
     }
   },
-        healthyLinksCount: 0,
-        brokenLinksCount: 0,
-        topPrograms: [],
-        clicksOverTime: [],
-        referrerBreakdown: [],
-        deviceBreakdown: []
-      };
-    }
-  },
 
   // Notifications APIs
   async getNotificationConfig(): Promise<{ settings: NotificationSettings; history: NotificationLog[] }> {
