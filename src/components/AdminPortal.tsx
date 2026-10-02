@@ -214,12 +214,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const loadReviews = async () => {
     setLoadingReviews(true);
     try {
-      const data = await api.getReviews();
+      const data = await api.getAllReviews();
       setReviews(data);
     } catch (err) {
       console.error(err);
     } finally {
       setLoadingReviews(false);
+    }
+  };
+
+  const handleModerateReview = async (id: string, status: 'approved' | 'rejected') => {
+    try {
+      await api.moderateReview(id, status, status === 'approved');
+      setReviews(prev => prev.map(r => r.id === id ? { ...r, status, verified: status === 'approved' } : r));
+    } catch (err: any) {
+      alert(err.message || 'Failed to moderate review');
     }
   };
 
@@ -652,7 +661,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               Registered Owner: <span className="font-mono text-slate-700 font-bold">abbas.aj@gmail.com</span>
             </p>
             <p className="text-[10px] text-slate-400 mt-0.5">
-              Default password: <span className="font-mono font-bold text-indigo-600">AffiliateOS@2026</span>
+              Secure PostgreSQL session verification
             </p>
           </div>
         </div>
@@ -1918,6 +1927,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700">
                               {rev.program_name}
                             </span>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              rev.status === 'approved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                              rev.status === 'rejected' ? 'bg-rose-50 text-rose-700 border border-rose-200' :
+                              'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}>
+                              {rev.status.toUpperCase()}
+                            </span>
                           </div>
                           <div className="flex items-center gap-1">
                             {[1, 2, 3, 4, 5].map((s) => (
@@ -1932,13 +1948,33 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                             </span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => handleDeleteReview(rev.id)}
-                          className="text-rose-600 hover:text-rose-800 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer"
-                          title="Delete review"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {rev.status !== 'approved' && (
+                            <button
+                              onClick={() => handleModerateReview(rev.id, 'approved')}
+                              className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-bold rounded-lg transition cursor-pointer"
+                              title="Approve review for public display"
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {rev.status !== 'rejected' && (
+                            <button
+                              onClick={() => handleModerateReview(rev.id, 'rejected')}
+                              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold rounded-lg transition cursor-pointer"
+                              title="Reject review"
+                            >
+                              Reject
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDeleteReview(rev.id)}
+                            className="text-rose-600 hover:text-rose-800 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer"
+                            title="Delete review"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                       {rev.title && (
                         <h4 className="font-bold text-slate-900 text-xs">&quot;{rev.title}&quot;</h4>
