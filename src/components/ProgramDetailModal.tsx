@@ -108,13 +108,14 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
   };
 
   const handleCtaClick = () => {
-    onTrackClick(program.id);
+    // Authoritative click tracking occurs server-side at /go/:slug
     window.open(`/go/${program.cloaked_slug}`, '_blank', 'noopener,noreferrer');
   };
 
-  const averageRating = reviews.length > 0
-    ? (reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1)
-    : '5.0';
+  const approvedReviews = reviews.filter(r => r.status === 'approved');
+  const averageRating = approvedReviews.length > 0
+    ? (approvedReviews.reduce((acc, r) => acc + r.rating, 0) / approvedReviews.length).toFixed(1)
+    : null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 backdrop-blur-sm overflow-y-auto animate-fade-in">
@@ -160,10 +161,16 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Verified Service
                 </span>
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 border border-amber-200 text-amber-800">
-                  <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                  {averageRating} ({reviews.length} {reviews.length === 1 ? 'review' : 'reviews'})
-                </span>
+                {averageRating ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 border border-amber-200 text-amber-800">
+                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                    {averageRating} ({approvedReviews.length} {approvedReviews.length === 1 ? 'review' : 'reviews'})
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+                    No reviews yet
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 mt-1">
                 Category: <strong className="text-slate-800">{program.category}</strong>
@@ -266,7 +273,7 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
             {reviewSuccess && (
               <div className="mb-4 p-3 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center gap-2 text-xs text-emerald-800 font-semibold animate-fade-in">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Thank you! Your verified review has been submitted and published.</span>
+                <span>Thank you! Your review has been submitted for moderation and will appear once approved.</span>
               </div>
             )}
 
@@ -386,9 +393,9 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
               <div className="text-center py-4">
                 <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-600" />
               </div>
-            ) : reviews.length === 0 ? (
+            ) : approvedReviews.length === 0 ? (
               <div className="p-4 rounded-2xl bg-slate-50 border border-dashed border-slate-200 text-center">
-                <p className="text-xs text-slate-500">No user reviews submitted yet.</p>
+                <p className="text-xs text-slate-500">No approved reviews yet.</p>
                 <button
                   type="button"
                   onClick={() => setShowReviewForm(true)}
@@ -399,7 +406,7 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
               </div>
             ) : (
               <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
-                {reviews.map((rev) => (
+                {approvedReviews.map((rev) => (
                   <div key={rev.id} className="p-3 rounded-2xl bg-slate-50/80 border border-slate-200 text-xs space-y-1.5">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -407,10 +414,14 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
                           {rev.user_name.charAt(0).toUpperCase()}
                         </div>
                         <span className="font-extrabold text-slate-900">{rev.user_name}</span>
-                        {rev.verified && (
+                        {rev.verified ? (
                           <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-200">
                             <CheckCircle2 className="w-3 h-3" />
-                            Verified
+                            Verified Customer
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-full">
+                            Community Review
                           </span>
                         )}
                       </div>

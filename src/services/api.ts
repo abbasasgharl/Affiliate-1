@@ -11,7 +11,65 @@ import {
   UserRole
 } from '../types';
 
+const TOKEN_KEY = 'affiliateos_auth_token';
+
+function getAuthHeader(): Record<string, string> {
+  const token = localStorage.getItem(TOKEN_KEY);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export const api = {
+  // Authentication APIs
+  async login(email: string, password: string): Promise<{ user: AdminUser; token: string }> {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error?.message || 'Invalid email or password.');
+    }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem('affiliateos_admin_role', data.user.role);
+    return data;
+  },
+
+  async getMe(): Promise<AdminUser | null> {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return null;
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: getAuthHeader()
+      });
+      if (!res.ok) {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem('affiliateos_admin_role');
+        return null;
+      }
+      const data = await res.json();
+      return data.user;
+    } catch {
+      return null;
+    }
+  },
+
+  async logout(): Promise<void> {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', headers: getAuthHeader() });
+    } catch {
+      // ignore
+    } finally {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem('affiliateos_admin_role');
+    }
+  },
+
+  getStoredToken(): string | null {
+    return localStorage.getItem(TOKEN_KEY);
+  },
+
+  // Programs APIs
   async getPrograms(): Promise<AffiliateProgram[]> {
     try {
       const res = await fetch('/api/programs');
@@ -27,7 +85,7 @@ export const api = {
   async createProgram(programData: Partial<AffiliateProgram>): Promise<AffiliateProgram> {
     const res = await fetch('/api/programs', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(programData)
     });
     const data = await res.json();
@@ -38,7 +96,7 @@ export const api = {
   async updateProgram(id: string, updates: Partial<AffiliateProgram>): Promise<AffiliateProgram> {
     const res = await fetch(`/api/programs/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(updates)
     });
     const data = await res.json();
@@ -48,7 +106,8 @@ export const api = {
 
   async deleteProgram(id: string): Promise<string> {
     const res = await fetch(`/api/programs/${id}`, {
-      method: 'DELETE'
+      method: 'DELETE',
+      headers: getAuthHeader()
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete program');
@@ -62,7 +121,7 @@ export const api = {
   }> {
     const res = await fetch('/api/ai/analyze-link', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify({ url })
     });
     const data = await res.json();
@@ -73,7 +132,7 @@ export const api = {
   async checkLinkHealth(options: { programId?: string; url?: string; checkAll?: boolean }): Promise<any> {
     const res = await fetch('/api/health/check', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(options)
     });
     const data = await res.json();
@@ -81,15 +140,26 @@ export const api = {
     return data;
   },
 
+  // Clicks & Analytics APIs
   async getClicks(programId?: string, limit = 100): Promise<{ clicks: ClickRecord[]; total: number }> {
     try {
       const url = programId ? `/api/clicks?program_id=${programId}&limit=${limit}` : `/api/clicks?limit=${limit}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: getAuthHeader() });
       if (!res.ok) throw new Error('Failed to fetch clicks');
       return await res.json();
     } catch {
       return { clicks: [], total: 0 };
     }
+  },
+
+  async clearClicks(): Promise<{ success: boolean; cleared: number; message: string }> {
+    const res = await fetch('/api/clicks', {
+      method: 'DELETE',
+      headers: getAuthHeader()
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || data.error || 'Failed to clear clicks');
+    return data;
   },
 
   async trackClientClick(programId: string): Promise<void> {
@@ -133,9 +203,10 @@ export const api = {
     }
   },
 
+  // Notifications APIs
   async getNotificationConfig(): Promise<{ settings: NotificationSettings; history: NotificationLog[] }> {
     try {
-      const res = await fetch('/api/notifications');
+      const res = await fetch('/api/notifications', { headers: getAuthHeader() });
       if (!res.ok) throw new Error('Failed to fetch notification config');
       return await res.json();
     } catch {
@@ -160,23 +231,32 @@ export const api = {
   async updateNotificationSettings(settings: Partial<NotificationSettings>): Promise<NotificationSettings> {
     const res = await fetch('/api/notifications/settings', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(settings)
     });
     const data = await res.json();
-    if (!res.ok) throw new Error('Failed to update notification settings');
+    if (!res.ok) throw new Error(data.error || 'Failed to update notification settings');
     return data.settings;
   },
 
-  async sendTestNotification(channel: string): Promise<NotificationLog> {
+  async sendTestNotification(channel: string, test_email?: string): Promise<NotificationLog> {
     const res = await fetch('/api/notifications/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel })
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ channel, test_email })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to dispatch test notification');
     return data.notification;
+  },
+
+  async verifySmtp(settings: Partial<NotificationSettings>): Promise<{ ok: boolean; message: string }> {
+    const res = await fetch('/api/notifications/verify-smtp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(settings)
+    });
+    return await res.json();
   },
 
   // Visitor tracking
@@ -214,14 +294,17 @@ export const api = {
   },
 
   async deleteReview(id: string): Promise<void> {
-    const res = await fetch(`/api/reviews/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/reviews/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeader()
+    });
     if (!res.ok) throw new Error('Failed to delete review');
   },
 
   // Admin User Management API
   async getAdminUsers(): Promise<AdminUser[]> {
     try {
-      const res = await fetch('/api/admin/users');
+      const res = await fetch('/api/admin/users', { headers: getAuthHeader() });
       if (!res.ok) throw new Error('Failed to fetch admin users');
       const data = await res.json();
       return data.users || [];
@@ -231,10 +314,10 @@ export const api = {
     }
   },
 
-  async createAdminUser(userData: { name: string; email: string; role: UserRole }): Promise<AdminUser> {
+  async createAdminUser(userData: { name: string; email: string; role: UserRole; password?: string }): Promise<AdminUser> {
     const res = await fetch('/api/admin/users', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(userData)
     });
     const data = await res.json();
@@ -243,15 +326,18 @@ export const api = {
   },
 
   async deleteAdminUser(id: string): Promise<void> {
-    const res = await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/admin/users/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeader()
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to revoke admin user');
   },
 
-  // Contact Form API
+  // Contact Form & Inquiries API
   async getContactMessages(): Promise<ContactMessage[]> {
     try {
-      const res = await fetch('/api/contact');
+      const res = await fetch('/api/contact', { headers: getAuthHeader() });
       if (!res.ok) throw new Error('Failed to fetch contact messages');
       const data = await res.json();
       return data.messages || [];
@@ -278,6 +364,27 @@ export const api = {
   },
 
   async markMessageRead(id: string): Promise<void> {
-    await fetch(`/api/contact/${id}/read`, { method: 'PUT' });
+    await fetch(`/api/contact/${id}/read`, {
+      method: 'PUT',
+      headers: getAuthHeader()
+    });
+  },
+
+  async deleteContactMessage(id: string): Promise<void> {
+    const res = await fetch(`/api/contact/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeader()
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete message');
+  },
+
+  async clearAllContactMessages(): Promise<void> {
+    const res = await fetch('/api/contact', {
+      method: 'DELETE',
+      headers: getAuthHeader()
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to clear all messages');
   }
 };

@@ -76,7 +76,7 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
 
   const handleRedirect = (e: React.MouseEvent, program: AffiliateProgram) => {
     e.stopPropagation();
-    onTrackClick(program.id);
+    // Authoritative click tracking occurs server-side at /go/:slug
     window.open(`/go/${program.cloaked_slug}`, '_blank', 'noopener,noreferrer');
   };
 

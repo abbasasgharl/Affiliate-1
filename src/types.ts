@@ -69,6 +69,8 @@ export interface AdminUser {
   email: string;
   name: string;
   role: UserRole;
+  password_hash?: string;
+  status?: 'active' | 'suspended';
   avatar_url?: string;
   last_login?: string;
 }
@@ -93,6 +95,13 @@ export type RateLimitMode = 'instant' | 'digest_15m' | 'digest_hourly';
 export interface NotificationSettings {
   enable_email: boolean;
   alert_email: string;
+  // SMTP credentials for live email delivery
+  smtp_host?: string;
+  smtp_port?: number;
+  smtp_user?: string;
+  smtp_pass?: string;
+  smtp_secure?: boolean;
+  from_email?: string;
   enable_telegram: boolean;
   telegram_bot_token: string;
   telegram_chat_id: string;
@@ -101,6 +110,29 @@ export interface NotificationSettings {
   rate_limit_mode: RateLimitMode;
   min_clicks_threshold: number;
   alert_on_broken_link: boolean;
+}
+
+export interface AuditLog {
+  id: string;
+  user_id: string;
+  user_email: string;
+  action: string;
+  resource_type: string;
+  resource_id?: string;
+  metadata?: Record<string, any>;
+  timestamp: string;
+  ip_hash: string;
+}
+
+export interface VisitorSession {
+  id: string;
+  session_id: string;
+  ip_hash: string;
+  first_seen: string;
+  last_seen: string;
+  landing_page?: string;
+  referrer?: string;
+  device?: DeviceType;
 }
 
 export interface BulkImportItem {

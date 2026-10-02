@@ -31,7 +31,12 @@ import {
   Star,
   Eye,
   ShieldAlert,
-  Inbox
+  Inbox,
+  ChevronLeft,
+  ChevronRight,
+  Server,
+  Key,
+  EyeOff
 } from 'lucide-react';
 import {
   AffiliateProgram,
@@ -117,6 +122,31 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Contact Messages & Inquiries State
   const [contactMessages, setContactMessages] = useState<ContactMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [deleteMessageSuccess, setDeleteMessageSuccess] = useState('');
+
+  // Scroller / Tab Drag Navigation State
+  const tabContainerRef = React.useRef<HTMLDivElement>(null);
+  const [isDraggingTabs, setIsDraggingTabs] = useState(false);
+  const [hasDraggedTabs, setHasDraggedTabs] = useState(false);
+  const [tabStartX, setTabStartX] = useState(0);
+  const [tabScrollLeft, setTabScrollLeft] = useState(0);
+
+  // Clear Analytics & Click Logs State
+  const [clearingClicks, setClearingClicks] = useState(false);
+  const [clearClicksSuccess, setClearClicksSuccess] = useState('');
+
+  // SMTP Configuration & Test State
+  const [verifyingSmtp, setVerifyingSmtp] = useState(false);
+  const [smtpStatusMessage, setSmtpStatusMessage] = useState<{ ok: boolean; message: string } | null>(null);
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+  const [testRecipientEmail, setTestRecipientEmail] = useState('');
+
+  // Unauthenticated Viewer Gate Login State
+  const [gateEmail, setGateEmail] = useState('abbas.aj@gmail.com');
+  const [gatePassword, setGatePassword] = useState('');
+  const [gateError, setGateError] = useState('');
+  const [gateLoading, setGateLoading] = useState(false);
+  const [showGatePassword, setShowGatePassword] = useState(false);
 
   const needsReviewItems = useMemo(() => {
     return programs.filter(p => p.status === 'needs_review' || p.status === 'manual_needed');
@@ -261,6 +291,123 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
+  const handleDeleteMessage = async (id: string) => {
+    if (!window.confirm('Delete this user contact inquiry permanently?')) return;
+    try {
+      await api.deleteContactMessage(id);
+      setContactMessages(prev => prev.filter(m => m.id !== id));
+      setDeleteMessageSuccess('Message deleted successfully.');
+      setTimeout(() => setDeleteMessageSuccess(''), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete message');
+    }
+  };
+
+  const handleClearAllMessages = async () => {
+    if (!window.confirm('Are you sure you want to permanently clear ALL user contact inquiries? This action cannot be undone.')) return;
+    try {
+      await api.clearAllContactMessages();
+      setContactMessages([]);
+      setDeleteMessageSuccess('All contact inquiries have been cleared.');
+      setTimeout(() => setDeleteMessageSuccess(''), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to clear all contact messages');
+    }
+  };
+
+  const handleClearClicks = async () => {
+    if (!window.confirm('Are you sure you want to permanently clear all referral click logs and reset analytics counters to 0?')) return;
+    setClearingClicks(true);
+    try {
+      const res = await api.clearClicks();
+      setClicks([]);
+      await loadAnalytics();
+      setClearClicksSuccess(res.message || 'All click logs cleared and analytics reset to 0!');
+      setTimeout(() => setClearClicksSuccess(''), 4000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to clear clicks');
+    } finally {
+      setClearingClicks(false);
+    }
+  };
+
+  const handleVerifySmtp = async () => {
+    if (!notifSettings) return;
+    setVerifyingSmtp(true);
+    setSmtpStatusMessage(null);
+    try {
+      const res = await api.verifySmtp(notifSettings);
+      setSmtpStatusMessage(res);
+    } catch (err: any) {
+      setSmtpStatusMessage({ ok: false, message: err.message || 'Verification failed.' });
+    } finally {
+      setVerifyingSmtp(false);
+    }
+  };
+
+  const handleGateLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGateError('');
+    if (!gateEmail.trim()) {
+      setGateError('Please enter your admin email.');
+      return;
+    }
+    if (!gatePassword) {
+      setGateError('Please enter your password.');
+      return;
+    }
+    setGateLoading(true);
+    try {
+      const data = await api.login(gateEmail.trim(), gatePassword);
+      onRoleChange(data.user.role);
+    } catch (err: any) {
+      setGateError(err.message || 'Invalid admin credentials. Please enter valid password.');
+    } finally {
+      setGateLoading(false);
+    }
+  };
+
+  // Tab drag-to-scroll & slide controls
+  const scrollTabs = (direction: 'left' | 'right') => {
+    if (!tabContainerRef.current) return;
+    tabContainerRef.current.scrollBy({
+      left: direction === 'left' ? -280 : 280,
+      behavior: 'smooth'
+    });
+  };
+
+  const handleTabMouseDown = (e: React.MouseEvent) => {
+    if (!tabContainerRef.current) return;
+    setIsDraggingTabs(true);
+    setHasDraggedTabs(false);
+    setTabStartX(e.pageX - tabContainerRef.current.offsetLeft);
+    setTabScrollLeft(tabContainerRef.current.scrollLeft);
+  };
+
+  const handleTabMouseMove = (e: React.MouseEvent) => {
+    if (!isDraggingTabs || !tabContainerRef.current) return;
+    e.preventDefault();
+    const x = e.pageX - tabContainerRef.current.offsetLeft;
+    const walk = (x - tabStartX) * 1.5;
+    if (Math.abs(walk) > 5) {
+      setHasDraggedTabs(true);
+    }
+    tabContainerRef.current.scrollLeft = tabScrollLeft - walk;
+  };
+
+  const handleTabMouseUpOrLeave = () => {
+    setIsDraggingTabs(false);
+    // Reset drag threshold slightly delayed so onClick can read it
+    setTimeout(() => {
+      setHasDraggedTabs(false);
+    }, 50);
+  };
+
+  const selectTab = (tab: AdminTab) => {
+    if (hasDraggedTabs) return;
+    setActiveTab(tab);
+  };
+
   const handleToggleStatus = async (program: AffiliateProgram) => {
     const newStatus = program.status === 'active' ? 'paused' : 'active';
     try {
@@ -397,12 +544,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     });
   }, [clicks, clickProgramFilter, clickDeviceFilter]);
 
-  const handleSendTestPing = async (channel: string) => {
+  const handleSendTestPing = async (channel: string, targetEmail?: string) => {
     setSendingTestPing(true);
     try {
-      const result = await api.sendTestNotification(channel);
+      const email = targetEmail || notifSettings?.alert_email || 'abbas.aj@gmail.com';
+      const result = await api.sendTestNotification(channel, email);
       setNotifHistory(prev => [result, ...prev]);
-      alert(`Test alert sent successfully to ${channel.toUpperCase()}!`);
+      alert(`Test notification dispatched for ${email}! Check the live log below for delivery details.`);
     } catch (err: any) {
       alert(err.message || 'Failed to dispatch test notification');
     } finally {
@@ -426,28 +574,86 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   if (currentUserRole === 'viewer') {
     return (
       <div className="max-w-4xl mx-auto px-4 py-20 text-center">
-        <div className="bg-white border border-slate-200 rounded-3xl p-8 max-w-md mx-auto shadow-xl">
-          <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center mx-auto mb-4">
+        <div className="bg-white border border-slate-200 rounded-3xl p-8 max-w-md mx-auto shadow-xl text-left">
+          <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto mb-4 shadow-2xs">
             <Lock className="w-6 h-6" />
           </div>
-          <h2 className="text-xl font-extrabold text-slate-900 mb-2">Admin Portal Access</h2>
-          <p className="text-xs text-slate-500 mb-6 leading-relaxed">
-            Select an authorized role to manage referral links, check click tracking, or review AI-analyzed programs.
+          <h2 className="text-xl font-black text-slate-900 text-center mb-1">Admin Portal Access</h2>
+          <p className="text-xs text-slate-500 text-center mb-6 leading-relaxed">
+            Please enter your administrator email and password to access the referral management portal.
           </p>
-          <div className="space-y-3">
+
+          {gateError && (
+            <div className="mb-4 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-semibold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{gateError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleGateLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Admin Email *</label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="email"
+                  required
+                  value={gateEmail}
+                  onChange={(e) => setGateEmail(e.target.value)}
+                  placeholder="abbas.aj@gmail.com"
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white font-medium"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Password *</label>
+              <div className="relative">
+                <Key className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type={showGatePassword ? 'text' : 'password'}
+                  required
+                  value={gatePassword}
+                  onChange={(e) => setGatePassword(e.target.value)}
+                  placeholder="Enter admin password"
+                  className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGatePassword(!showGatePassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                >
+                  {showGatePassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
             <button
-              onClick={() => onRoleChange('super_admin')}
-              className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs transition shadow-md shadow-indigo-600/20 flex items-center justify-center gap-2 cursor-pointer"
+              type="submit"
+              disabled={gateLoading}
+              className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-extrabold text-xs transition shadow-md shadow-indigo-600/20 flex items-center justify-center gap-2 cursor-pointer mt-2"
             >
-              <ShieldCheck className="w-4 h-4" />
-              <span>Enter as Super Admin</span>
+              {gateLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Verifying Credentials...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Authenticate & Enter Admin Hub</span>
+                </>
+              )}
             </button>
-            <button
-              onClick={() => onRoleChange('editor')}
-              className="w-full py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <span>Enter as Editor</span>
-            </button>
+          </form>
+
+          <div className="mt-5 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-center">
+            <p className="text-[11px] text-slate-500 font-medium">
+              Registered Owner: <span className="font-mono text-slate-700 font-bold">abbas.aj@gmail.com</span>
+            </p>
+            <p className="text-[10px] text-slate-400 mt-0.5">
+              Default password: <span className="font-mono font-bold text-indigo-600">AffiliateOS@2026</span>
+            </p>
           </div>
         </div>
       </div>
@@ -490,142 +696,174 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         </div>
       </div>
 
-      {/* Admin Tab Navigation */}
-      <div className="flex items-center gap-1.5 overflow-x-auto py-4 border-b border-slate-200 scrollbar-none">
-        <button
-          onClick={() => setActiveTab('programs')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'programs'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Layers className="w-4 h-4" />
-          <span>Programs ({programs.length})</span>
-        </button>
+      {/* Admin Tab Navigation with Interactive Slider & Chevrons */}
+      <div className="relative border-b border-slate-200 py-3">
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => scrollTabs('left')}
+            className="flex items-center justify-center w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-700 shrink-0 transition cursor-pointer border border-slate-200/80 shadow-2xs"
+            title="Slide tabs left"
+            aria-label="Slide tabs left"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
 
-        <button
-          onClick={() => setActiveTab('review_queue')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer relative ${
-            activeTab === 'review_queue'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Sparkles className="w-4 h-4" />
-          <span>Review Staging</span>
-          {needsReviewItems.length > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white font-bold text-[10px]">
-              {needsReviewItems.length}
-            </span>
-          )}
-        </button>
+          <div
+            ref={tabContainerRef}
+            onMouseDown={handleTabMouseDown}
+            onMouseMove={handleTabMouseMove}
+            onMouseUp={handleTabMouseUpOrLeave}
+            onMouseLeave={handleTabMouseUpOrLeave}
+            className={`flex items-center gap-1.5 overflow-x-auto py-1 scroll-smooth select-none ${
+              isDraggingTabs ? 'cursor-grabbing' : 'cursor-grab'
+            }`}
+            style={{ scrollbarWidth: 'thin' }}
+          >
+            <button
+              onClick={() => selectTab('programs')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'programs'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Layers className="w-4 h-4" />
+              <span>Programs ({programs.length})</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('bulk_import')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'bulk_import'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <UploadCloud className="w-4 h-4" />
-          <span>Bulk Ingestion</span>
-        </button>
+            <button
+              onClick={() => selectTab('review_queue')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer relative ${
+                activeTab === 'review_queue'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Review Staging</span>
+              {needsReviewItems.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white font-bold text-[10px]">
+                  {needsReviewItems.length}
+                </span>
+              )}
+            </button>
 
-        <button
-          onClick={() => setActiveTab('health_checker')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'health_checker'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Activity className="w-4 h-4" />
-          <span>Link Health</span>
-        </button>
+            <button
+              onClick={() => selectTab('bulk_import')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'bulk_import'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <UploadCloud className="w-4 h-4" />
+              <span>Bulk Ingestion</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('analytics')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'analytics'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <BarChart3 className="w-4 h-4" />
-          <span>Click Analytics</span>
-        </button>
+            <button
+              onClick={() => selectTab('health_checker')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'health_checker'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Activity className="w-4 h-4" />
+              <span>Link Health</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('clicks')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'clicks'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <ListFilter className="w-4 h-4" />
-          <span>Click Logs</span>
-        </button>
+            <button
+              onClick={() => selectTab('analytics')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'analytics'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Click Analytics</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('notifications')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'notifications'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Bell className="w-4 h-4" />
-          <span>Email & Click Alerts</span>
-        </button>
+            <button
+              onClick={() => selectTab('clicks')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'clicks'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <ListFilter className="w-4 h-4" />
+              <span>Click Logs</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('team_management')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'team_management'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Users className="w-4 h-4" />
-          <span>Admin Users & Privileges</span>
-        </button>
+            <button
+              onClick={() => selectTab('notifications')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'notifications'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Bell className="w-4 h-4" />
+              <span>Email & Click Alerts</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('reviews')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'reviews'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Star className="w-4 h-4" />
-          <span>User Reviews</span>
-          {reviews.length > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-slate-200 text-slate-800 font-bold text-[10px]">
-              {reviews.length}
-            </span>
-          )}
-        </button>
+            <button
+              onClick={() => selectTab('team_management')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'team_management'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Users className="w-4 h-4" />
+              <span>Admin Users & Privileges</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('inbox')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
-            activeTab === 'inbox'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-          }`}
-        >
-          <Mail className="w-4 h-4" />
-          <span>User Inquiries</span>
-          {contactMessages.filter(m => m.status === 'unread').length > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white font-bold text-[10px]">
-              {contactMessages.filter(m => m.status === 'unread').length} new
-            </span>
-          )}
-        </button>
+            <button
+              onClick={() => selectTab('reviews')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'reviews'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Star className="w-4 h-4" />
+              <span>User Reviews</span>
+              {reviews.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-slate-200 text-slate-800 font-bold text-[10px]">
+                  {reviews.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => selectTab('inbox')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                activeTab === 'inbox'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Mail className="w-4 h-4" />
+              <span>User Inquiries</span>
+              {contactMessages.filter(m => m.status === 'unread').length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white font-bold text-[10px]">
+                  {contactMessages.filter(m => m.status === 'unread').length} new
+                </span>
+              )}
+            </button>
+          </div>
+
+          <button
+            onClick={() => scrollTabs('right')}
+            className="flex items-center justify-center w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-700 shrink-0 transition cursor-pointer border border-slate-200/80 shadow-2xs"
+            title="Slide tabs right"
+            aria-label="Slide tabs right"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* ========================================================================= */}
@@ -949,6 +1187,31 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       {/* ========================================================================= */}
       {activeTab === 'analytics' && (
         <div className="mt-6 space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-3xl border border-slate-200">
+            <div>
+              <h2 className="text-sm font-black text-slate-900">Traffic & Referral Click Intelligence</h2>
+              <p className="text-xs text-slate-500">Live authoritative visitor and referral redirect click tracking metrics.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleClearClicks}
+                disabled={clearingClicks}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold transition cursor-pointer shadow-2xs"
+                title="Reset all click logs and counters back to 0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{clearingClicks ? 'Clearing...' : 'Clear All Analytics Data'}</span>
+              </button>
+            </div>
+          </div>
+
+          {clearClicksSuccess && (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{clearClicksSuccess}</span>
+            </div>
+          )}
+
           {analyticsLoading || !analytics ? (
             <div className="py-20 text-center">
               <RefreshCw className="w-8 h-8 text-indigo-600 animate-spin mx-auto mb-2" />
@@ -964,10 +1227,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <Users className="w-4 h-4 text-indigo-600" />
                   </div>
                   <p className="text-3xl font-black text-slate-900">
-                    {(analytics.totalVisitors || 890).toLocaleString()}
+                    {(analytics.totalVisitors || 0).toLocaleString()}
                   </p>
                   <span className="text-[10px] text-emerald-600 font-bold mt-1 block">
-                    +{analytics.todayVisitors || 48} visitors today
+                    +{analytics.todayVisitors || 0} visitors today
                   </span>
                 </div>
 
@@ -977,10 +1240,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <ExternalLink className="w-4 h-4 text-emerald-600" />
                   </div>
                   <p className="text-3xl font-black text-emerald-600">
-                    {analytics.totalClicks.toLocaleString()}
+                    {(analytics.totalClicks || 0).toLocaleString()}
                   </p>
                   <span className="text-[10px] text-emerald-600 font-bold mt-1 block">
-                    +{analytics.todayClicks} referral clicks today
+                    +{analytics.todayClicks || 0} referral clicks today
                   </span>
                 </div>
 
@@ -990,7 +1253,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <Activity className="w-4 h-4 text-cyan-600" />
                   </div>
                   <p className="text-3xl font-black text-indigo-600">
-                    {analytics.clickThroughRate || 24.8}%
+                    {analytics.clickThroughRate || 0}%
                   </p>
                   <span className="text-[10px] text-slate-400 font-medium mt-1 block">
                     Referral Clicks ÷ Site Visitors
@@ -1003,10 +1266,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <Gift className="w-4 h-4 text-amber-500" />
                   </div>
                   <p className="text-3xl font-black text-slate-900">
-                    ${analytics.estimatedRevenue.toLocaleString()}
+                    ${(analytics.estimatedRevenue || 0).toLocaleString()}
                   </p>
                   <span className="text-[10px] text-slate-400 font-medium mt-1 block">
-                    Across {programs.filter(p => p.status === 'active').length} active programs
+                    Calculated from actual referral click volume
                   </span>
                 </div>
               </div>
@@ -1034,10 +1297,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <div className="space-y-3">
                     <div className="grid grid-cols-7 gap-2 items-end h-44 pt-4 border-b border-slate-100">
                       {analytics.clicksOverTime.map((day, idx) => {
-                        const visitors = day.visitors || Math.round(day.clicks * 3.2 + 20);
-                        const maxVal = Math.max(...analytics.clicksOverTime.map(d => d.visitors || Math.round(d.clicks * 3.2 + 20)), 50);
-                        const visitorHeight = Math.max(12, Math.round((visitors / maxVal) * 100));
-                        const clickHeight = Math.max(8, Math.round((day.clicks / maxVal) * 100));
+                        const visitors = day.visitors || 0;
+                        const maxVal = Math.max(...analytics.clicksOverTime.map(d => Math.max(d.visitors || 0, d.clicks || 0)), 10);
+                        const visitorHeight = maxVal > 0 && visitors > 0 ? Math.max(8, Math.round((visitors / maxVal) * 100)) : 0;
+                        const clickHeight = maxVal > 0 && day.clicks > 0 ? Math.max(8, Math.round((day.clicks / maxVal) * 100)) : 0;
                         return (
                           <div key={idx} className="flex flex-col items-center h-full justify-end group">
                             <div className="flex items-end gap-1.5 w-full justify-center h-full">
@@ -1184,15 +1447,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       {/* ========================================================================= */}
       {activeTab === 'clicks' && (
         <div className="mt-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900">Recent Referral Clicks</h3>
-            <button
-              onClick={handleExportClicksCsv}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Export CSV</span>
-            </button>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <h3 className="text-sm font-bold text-slate-900">Recent Referral Clicks ({clicks.length})</h3>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleClearClicks}
+                disabled={clearingClicks || clicks.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50/60 hover:bg-rose-100 disabled:opacity-50 text-rose-700 text-xs font-bold transition cursor-pointer shadow-2xs"
+                title="Permanently clear click history"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear Click Logs</span>
+              </button>
+              <button
+                onClick={handleExportClicksCsv}
+                disabled={clicks.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold transition cursor-pointer shadow-2xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export CSV</span>
+              </button>
+            </div>
           </div>
 
           <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-xs">
@@ -1241,36 +1516,58 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         <div className="mt-6 space-y-6">
           {/* Email Notification on Referral Click Configuration */}
           <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs space-y-5">
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div>
                 <div className="flex items-center gap-2">
                   <Mail className="w-5 h-5 text-indigo-600" />
-                  <h3 className="text-base font-extrabold text-slate-900">Admin Email Notifications on Click</h3>
+                  <h3 className="text-base font-extrabold text-slate-900">Admin Email Notifications & SMTP Delivery</h3>
                 </div>
                 <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  When a visitor clicks your referral link (e.g. Nexcess, Plesk, Cursor), the system automatically triggers an email notification to alert you of the referral activity.
+                  When a visitor clicks your referral link (e.g. Nexcess, Plesk, Cursor), the system triggers real-time email alerts. Configure your SMTP mail server credentials below for direct inbox delivery.
                 </p>
               </div>
-              <button
-                onClick={() => handleSendTestPing('email')}
-                disabled={sendingTestPing}
-                className="px-3.5 py-2 rounded-xl bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>{sendingTestPing ? 'Sending Test...' : 'Send Test Email Alert'}</span>
-              </button>
+
+              {/* Test Email Dispatch Card */}
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 p-2 rounded-2xl shrink-0">
+                <input
+                  type="email"
+                  value={testRecipientEmail}
+                  onChange={(e) => setTestRecipientEmail(e.target.value)}
+                  placeholder={notifSettings?.alert_email || 'abbas.aj@gmail.com'}
+                  className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 w-44 focus:outline-none focus:border-indigo-600 font-medium"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleSendTestPing('email', testRecipientEmail)}
+                  disabled={sendingTestPing}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-2xs"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{sendingTestPing ? 'Sending...' : 'Test Send'}</span>
+                </button>
+              </div>
             </div>
 
             {saveNotifSuccess && (
-              <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
+              <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>Notification settings saved successfully!</span>
+                <span>Notification & SMTP settings saved successfully!</span>
+              </div>
+            )}
+
+            {smtpStatusMessage && (
+              <div className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center gap-2 ${
+                smtpStatusMessage.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-700'
+              }`}>
+                {smtpStatusMessage.ok ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> : <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />}
+                <span>{smtpStatusMessage.message}</span>
               </div>
             )}
 
             {notifSettings && (
-              <form onSubmit={handleSaveNotifSettings} className="space-y-4 pt-2 border-t border-slate-100 text-xs">
-                <div className="flex items-center gap-3">
+              <form onSubmit={handleSaveNotifSettings} className="space-y-5 pt-3 border-t border-slate-100 text-xs">
+                {/* Master Alert Toggle */}
+                <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
                   <input
                     type="checkbox"
                     id="enable_email_clicks"
@@ -1279,13 +1576,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     className="w-4 h-4 text-indigo-600 rounded cursor-pointer"
                   />
                   <label htmlFor="enable_email_clicks" className="font-bold text-slate-800 cursor-pointer">
-                    Send Instant Email Alert when any referral link is clicked
+                    Enable Real-time Email Notifications on Referral Link Clicks
                   </label>
                 </div>
 
+                {/* Recipient & Frequency */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-slate-700 font-bold mb-1">Admin Alert Email *</label>
+                    <label className="block text-slate-700 font-bold mb-1">Admin Alert Recipient Email *</label>
                     <input
                       type="email"
                       required
@@ -1295,7 +1593,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                     />
                     <span className="text-[11px] text-slate-400 mt-1 block">
-                      Recipient for real-time link click notifications and contact form inquiries.
+                      Recipient for referral link click alerts and public visitor contact inquiries.
                     </span>
                   </div>
 
@@ -1304,21 +1602,114 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <select
                       value={notifSettings.rate_limit_mode}
                       onChange={(e) => setNotifSettings({ ...notifSettings, rate_limit_mode: e.target.value as any })}
-                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                     >
                       <option value="instant">Instant Notification (per referral click)</option>
                       <option value="digest_15m">15-Minute Click Digest</option>
                       <option value="digest_hourly">Hourly Click Digest</option>
                     </select>
+                    <span className="text-[11px] text-slate-400 mt-1 block">
+                      How frequently click notifications should be batched and delivered.
+                    </span>
+                  </div>
+                </div>
+
+                {/* SMTP Credentials Section */}
+                <div className="p-5 rounded-2xl bg-indigo-50/50 border border-indigo-100 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-indigo-100">
+                    <div className="flex items-center gap-2">
+                      <Server className="w-4 h-4 text-indigo-600" />
+                      <h4 className="font-extrabold text-slate-900 text-xs">SMTP Mail Server Credentials (Nodemailer)</h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleVerifySmtp}
+                      disabled={verifyingSmtp}
+                      className="px-3 py-1 bg-white hover:bg-slate-50 border border-indigo-200 text-indigo-700 text-[11px] font-bold rounded-lg transition cursor-pointer self-start sm:self-auto"
+                    >
+                      {verifyingSmtp ? 'Verifying SMTP...' : 'Verify SMTP Connection'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">SMTP Host</label>
+                      <input
+                        type="text"
+                        value={notifSettings.smtp_host || ''}
+                        onChange={(e) => setNotifSettings({ ...notifSettings, smtp_host: e.target.value })}
+                        placeholder="e.g. smtp.gmail.com"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-indigo-600 font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">SMTP Port</label>
+                      <input
+                        type="number"
+                        value={notifSettings.smtp_port || 587}
+                        onChange={(e) => setNotifSettings({ ...notifSettings, smtp_port: parseInt(e.target.value, 10) || 587 })}
+                        placeholder="587"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-indigo-600 font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">From Email Address</label>
+                      <input
+                        type="email"
+                        value={notifSettings.from_email || ''}
+                        onChange={(e) => setNotifSettings({ ...notifSettings, from_email: e.target.value })}
+                        placeholder="alerts@affiliateos.io"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-indigo-600 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">SMTP Username / Email</label>
+                      <input
+                        type="text"
+                        value={notifSettings.smtp_user || ''}
+                        onChange={(e) => setNotifSettings({ ...notifSettings, smtp_user: e.target.value })}
+                        placeholder="your-email@gmail.com"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-indigo-600 font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">SMTP Password / App Password</label>
+                      <div className="relative">
+                        <input
+                          type={showSmtpPassword ? 'text' : 'password'}
+                          value={notifSettings.smtp_pass || ''}
+                          onChange={(e) => setNotifSettings({ ...notifSettings, smtp_pass: e.target.value })}
+                          placeholder="••••••••••••••••"
+                          className="w-full px-3 pr-9 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-indigo-600 font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSmtpPassword(!showSmtpPassword)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          {showSmtpPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-white border border-indigo-100 text-[11px] text-slate-600 leading-relaxed">
+                    💡 <strong>Using Gmail?</strong> Set SMTP Host to <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-indigo-700">smtp.gmail.com</code>, Port to <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-indigo-700">587</code>, and use a 16-character <strong>Google App Password</strong> (from Google Account → Security → 2-Step Verification → App passwords).
                   </div>
                 </div>
 
                 <div className="flex justify-end pt-2">
                   <button
                     type="submit"
-                    className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs transition cursor-pointer shadow-md shadow-indigo-600/20"
+                    className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs transition cursor-pointer shadow-md shadow-indigo-600/20"
                   >
-                    Save Email Alert Preferences
+                    Save Email & SMTP Preferences
                   </button>
                 </div>
               </form>
@@ -1577,10 +1968,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   Messages submitted by visitors via the public contact form.
                 </p>
               </div>
-              <span className="text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-xl">
-                {contactMessages.filter(m => m.status === 'unread').length} Unread Messages
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-xl">
+                  {contactMessages.filter(m => m.status === 'unread').length} Unread Messages
+                </span>
+                <button
+                  onClick={handleClearAllMessages}
+                  disabled={contactMessages.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold transition cursor-pointer disabled:opacity-50 shadow-2xs"
+                  title="Permanently clear all contact inquiries"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Clear All Inquiries</span>
+                </button>
+              </div>
             </div>
+
+            {deleteMessageSuccess && (
+              <div className="mt-4 p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{deleteMessageSuccess}</span>
+              </div>
+            )}
 
             {loadingMessages ? (
               <div className="py-12 text-center text-slate-400">Loading messages...</div>
@@ -1628,6 +2037,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         >
                           Reply
                         </a>
+                        <button
+                          onClick={() => handleDeleteMessage(msg.id)}
+                          className="px-2.5 py-1 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 text-slate-500 hover:text-rose-600 text-[11px] font-bold rounded-lg transition flex items-center gap-1 cursor-pointer"
+                          title="Delete inquiry"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Delete</span>
+                        </button>
                       </div>
                     </div>
                     <p className="text-slate-700 leading-relaxed bg-white/70 p-3 rounded-xl border border-slate-100">

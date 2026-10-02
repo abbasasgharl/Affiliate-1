@@ -31,9 +31,19 @@ export default function App() {
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [activeLegalModal, setActiveLegalModal] = useState<'privacy' | 'terms' | 'contact' | null>(null);
 
-  // Load programs on initial mount & track site visitor
+  // Load programs on initial mount, track visitor, and verify active admin session
   useEffect(() => {
     api.recordVisitor();
+
+    // Verify session
+    api.getMe().then((user) => {
+      if (user) {
+        setCurrentUserRole(user.role);
+      } else {
+        setCurrentUserRole('viewer');
+      }
+    });
+
     const fetchPrograms = async () => {
       try {
         const data = await api.getPrograms();
@@ -57,13 +67,12 @@ export default function App() {
 
   const handleLoginSuccess = (role: UserRole) => {
     setCurrentUserRole(role);
-    localStorage.setItem('affiliateos_admin_role', role);
     setCurrentView('admin'); // switch to admin hub on login
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await api.logout();
     setCurrentUserRole('viewer');
-    localStorage.removeItem('affiliateos_admin_role');
     setCurrentView('public');
   };
 
