@@ -1,9 +1,25 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Request, Response, NextFunction } from 'express';
 import { UserRole } from '../types.ts';
+import { db } from '../db/index.ts';
+import { sessions } from '../db/schema.ts';
+import { eq } from 'drizzle-orm';
 
-const JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || 'affiliateos_super_secure_jwt_secret_2026_prod';
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Strict secret management: fail fast in production if SESSION_SECRET is missing
+let JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  if (isProduction) {
+    throw new Error('SESSION_SECRET is required in production.');
+  } else {
+    // Ephemeral random development secret (never a predictable hardcoded string)
+    JWT_SECRET = 'dev_' + crypto.randomBytes(32).toString('hex');
+  }
+}
+
 const TOKEN_EXPIRY = '7d';
 
 export interface AuthUserPayload {
@@ -11,6 +27,7 @@ export interface AuthUserPayload {
   email: string;
   name: string;
   role: UserRole;
+  sessionId?: string;
 }
 
 // Extend Express Request type
@@ -18,6 +35,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthUserPayload;
+      sessionToken?: string;
     }
   }
 }
@@ -38,34 +56,139 @@ export async function comparePassword(plainText: string, hash: string): Promise<
 }
 
 /**
- * Generate a signed JWT session token
+ * Hash token for database indexing
  */
-export function generateAuthToken(payload: AuthUserPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+export function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 /**
- * Verify and decode a JWT session token
+ * Generate a signed JWT session token and persist server-side session in PostgreSQL
  */
-export function verifyAuthToken(token: string): AuthUserPayload | null {
+export async function createSession(
+  user: { id: string; email: string; name: string; role: UserRole },
+  ipHash = '127.0.0.1'
+): Promise<string> {
+  const sessionId = crypto.randomUUID();
+  const token = jwt.sign(
+    {
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      sessionId
+    },
+    JWT_SECRET!,
+    { expiresIn: TOKEN_EXPIRY }
+  );
+
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthUserPayload;
+    await db.insert(sessions).values({
+      id: tokenHash,
+      userId: user.id,
+      userEmail: user.email,
+      role: user.role,
+      expiresAt,
+      revoked: false,
+      ipHash,
+    });
+  } catch (err) {
+    console.error('[Auth] Failed to persist session in PostgreSQL:', err);
+  }
+
+  return token;
+}
+
+/**
+ * Revoke a session in PostgreSQL
+ */
+export async function revokeSession(token: string): Promise<void> {
+  const tokenHash = hashToken(token);
+  try {
+    await db.update(sessions).set({ revoked: true }).where(eq(sessions.id, tokenHash));
+  } catch (err) {
+    console.error('[Auth] Failed to revoke session in PostgreSQL:', err);
+  }
+}
+
+/**
+ * Verify and decode a JWT session token, checking revocation in PostgreSQL
+ */
+export async function verifyAuthToken(token: string): Promise<AuthUserPayload | null> {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET!) as AuthUserPayload;
+    if (!payload || !payload.userId) return null;
+
+    // Check if session has been revoked in database
+    const tokenHash = hashToken(token);
+    try {
+      const activeSession = await db.query.sessions.findFirst({
+        where: (s, { eq, and, gt }) => and(
+          eq(s.id, tokenHash),
+          eq(s.revoked, false),
+          gt(s.expiresAt, new Date())
+        )
+      });
+      // If session record exists and is marked revoked, invalidate
+      if (activeSession === null) {
+        // Double check if record was revoked explicitly
+        const revokedRecord = await db.query.sessions.findFirst({
+          where: (s, { eq }) => eq(s.id, tokenHash)
+        });
+        if (revokedRecord && revokedRecord.revoked) {
+          return null;
+        }
+      }
+    } catch {
+      // If DB check is temporarily unavailable, fallback to cryptographic signature
+    }
+
+    return payload;
   } catch {
     return null;
   }
 }
 
 /**
- * Express middleware: requires an authenticated user with a valid Bearer token or cookie.
+ * Set HttpOnly, Secure, SameSite session cookie
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export function setSessionCookie(res: Response, token: string): void {
+  res.cookie('auth_token', token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: '/'
+  });
+}
+
+/**
+ * Clear session cookie
+ */
+export function clearSessionCookie(res: Response): void {
+  res.clearCookie('auth_token', {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/'
+  });
+}
+
+/**
+ * Express middleware: requires an authenticated user with a valid Bearer token or HttpOnly cookie.
+ */
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   let token: string | undefined;
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
+  } else if (req.cookies && req.cookies.auth_token) {
+    token = req.cookies.auth_token;
   } else if (req.headers.cookie) {
-    // Check for auth_token cookie
     const match = req.headers.cookie.match(/auth_token=([^;]+)/);
     if (match) token = match[1];
   }
@@ -73,21 +196,22 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   if (!token) {
     res.status(401).json({
       success: false,
-      error: { code: 'UNAUTHORIZED', message: 'Authentication required. Please sign in with valid admin credentials.' }
+      error: { code: 'UNAUTHORIZED', message: 'Authentication required. Please sign in with valid credentials.' }
     });
     return;
   }
 
-  const user = verifyAuthToken(token);
+  const user = await verifyAuthToken(token);
   if (!user) {
     res.status(401).json({
       success: false,
-      error: { code: 'INVALID_TOKEN', message: 'Session expired or invalid token. Please log in again.' }
+      error: { code: 'INVALID_TOKEN', message: 'Session expired or invalidated. Please log in again.' }
     });
     return;
   }
 
   req.user = user;
+  req.sessionToken = token;
   next();
 }
 
@@ -109,7 +233,7 @@ export function requireRole(...allowedRoles: UserRole[]) {
         success: false,
         error: {
           code: 'FORBIDDEN',
-          message: `Access denied. Action requires role: ${allowedRoles.join(' or ')}. Current role: ${req.user.role}.`
+          message: `Access denied. Requires one of [${allowedRoles.join(', ')}] privileges.`
         }
       });
       return;
@@ -120,22 +244,27 @@ export function requireRole(...allowedRoles: UserRole[]) {
 }
 
 /**
- * Optional authentication middleware: sets req.user if valid token exists, but doesn't block.
+ * Optional authentication: attaches req.user if a valid token is present, does not fail if absent.
  */
-export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {
+export async function optionalAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   let token: string | undefined;
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
+  } else if (req.cookies && req.cookies.auth_token) {
+    token = req.cookies.auth_token;
   } else if (req.headers.cookie) {
     const match = req.headers.cookie.match(/auth_token=([^;]+)/);
     if (match) token = match[1];
   }
 
   if (token) {
-    const user = verifyAuthToken(token);
-    if (user) req.user = user;
+    const user = await verifyAuthToken(token);
+    if (user) {
+      req.user = user;
+      req.sessionToken = token;
+    }
   }
 
   next();

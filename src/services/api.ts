@@ -35,6 +35,31 @@ export const api = {
     return data;
   },
 
+  async getSetupStatus(): Promise<{ setupRequired: boolean; ownerEmail: string }> {
+    try {
+      const res = await fetch('/api/auth/setup-status');
+      if (!res.ok) return { setupRequired: false, ownerEmail: 'abbas.aj@gmail.com' };
+      return await res.json();
+    } catch {
+      return { setupRequired: false, ownerEmail: 'abbas.aj@gmail.com' };
+    }
+  },
+
+  async setupAdmin(email: string, password: string, name?: string): Promise<{ user: AdminUser; token: string }> {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, name })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error?.message || 'Failed to complete initial admin setup.');
+    }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem('affiliateos_admin_role', data.user.role);
+    return data;
+  },
+
   async getMe(): Promise<AdminUser | null> {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return null;
@@ -162,25 +187,14 @@ export const api = {
     return data;
   },
 
-  async trackClientClick(programId: string): Promise<void> {
-    try {
-      await fetch('/api/clicks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          program_id: programId,
-          referrer: document.referrer || window.location.href,
-          user_agent: navigator.userAgent
-        })
-      });
-    } catch (err) {
-      console.warn('Failed to track client click:', err);
-    }
+  async trackClientClick(_programId: string): Promise<void> {
+    // Section 12: Single authoritative tracking path is GET /go/:slug
+    // Redundant client-side POST /api/clicks removed to avoid double counting
   },
 
   async getAnalytics(): Promise<AnalyticsSummary> {
     try {
-      const res = await fetch('/api/analytics');
+      const res = await fetch('/api/analytics', { headers: getAuthHeader() });
       if (!res.ok) throw new Error('Failed to fetch analytics');
       return await res.json();
     } catch (err) {
@@ -193,6 +207,15 @@ export const api = {
         todayVisitors: 0,
         todayClicks: 0,
         estimatedRevenue: 0,
+        healthyLinksCount: 0,
+        brokenLinksCount: 0,
+        topPrograms: [],
+        clicksOverTime: [],
+        referrerBreakdown: [],
+        deviceBreakdown: []
+      };
+    }
+  },
         healthyLinksCount: 0,
         brokenLinksCount: 0,
         topPrograms: [],
@@ -271,7 +294,7 @@ export const api = {
   // User Reviews API
   async getReviews(programId?: string): Promise<UserReview[]> {
     try {
-      const url = programId ? `/api/reviews?program_id=${programId}` : '/api/reviews';
+      const url = programId ? `/api/programs/${programId}/reviews` : '/api/reviews';
       const res = await fetch(url);
       if (!res.ok) throw new Error('Failed to fetch reviews');
       const data = await res.json();
@@ -280,6 +303,28 @@ export const api = {
       console.error('Error fetching reviews:', err);
       return [];
     }
+  },
+
+  async getAllReviews(): Promise<UserReview[]> {
+    try {
+      const res = await fetch('/api/reviews', { headers: getAuthHeader() });
+      if (!res.ok) throw new Error('Failed to fetch reviews for moderation');
+      const data = await res.json();
+      return data.reviews || [];
+    } catch (err) {
+      console.error('Error fetching admin reviews:', err);
+      return [];
+    }
+  },
+
+  async moderateReview(id: string, status: 'approved' | 'rejected' | 'pending', verified = false): Promise<boolean> {
+    const res = await fetch(`/api/reviews/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ status, verified })
+    });
+    const data = await res.json();
+    return data.success;
   },
 
   async submitReview(reviewData: Partial<UserReview>): Promise<UserReview> {

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Lock, ShieldCheck, Mail, Key, Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Lock, ShieldCheck, Mail, Key, Eye, EyeOff, Loader2, AlertCircle, UserCheck } from 'lucide-react';
 import { UserRole } from '../types';
 import { api } from '../services/api';
 
@@ -14,11 +14,23 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
   onClose,
   onLoginSuccess
 }) => {
+  const [isSetupMode, setIsSetupMode] = useState(false);
   const [email, setEmail] = useState('abbas.aj@gmail.com');
+  const [name, setName] = useState('Abbas (Owner)');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      api.getSetupStatus().then((status) => {
+        setIsSetupMode(status.setupRequired);
+        if (status.ownerEmail) setEmail(status.ownerEmail);
+      }).catch(() => {});
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -35,13 +47,30 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
       return;
     }
 
+    if (isSetupMode) {
+      if (password.length < 8) {
+        setError('Password must be at least 8 characters long for security.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Passwords do not match. Please verify your password confirmation.');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
-      const data = await api.login(email.trim(), password);
-      onLoginSuccess(data.user.role);
-      onClose();
+      if (isSetupMode) {
+        const data = await api.setupAdmin(email.trim(), password, name.trim());
+        onLoginSuccess(data.user.role);
+        onClose();
+      } else {
+        const data = await api.login(email.trim(), password);
+        onLoginSuccess(data.user.role);
+        onClose();
+      }
     } catch (err: any) {
-      setError(err.message || 'Invalid admin credentials. Please verify your email and password.');
+      setError(err.message || 'Authentication failed. Please verify your credentials.');
     } finally {
       setLoading(false);
     }
@@ -59,11 +88,15 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
         <div className="text-center mb-6">
           <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto mb-3 shadow-2xs">
-            <Lock className="w-6 h-6" />
+            {isSetupMode ? <UserCheck className="w-6 h-6" /> : <Lock className="w-6 h-6" />}
           </div>
-          <h2 className="text-xl font-black text-slate-900">Admin Portal Sign In</h2>
+          <h2 className="text-xl font-black text-slate-900">
+            {isSetupMode ? 'Initial Administrator Setup' : 'Admin Portal Sign In'}
+          </h2>
           <p className="text-xs text-slate-500 mt-1">
-            Restricted area. Please sign in with your administrator email and password.
+            {isSetupMode
+              ? 'Secure first-run setup: Create your personal primary administrator password.'
+              : 'Restricted area. Please sign in with your administrator email and password.'}
           </p>
         </div>
 
@@ -75,6 +108,19 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {isSetupMode && (
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Administrator Name</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Abbas (Owner)"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white font-medium"
+              />
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1">Admin Email *</label>
             <div className="relative">
@@ -91,7 +137,9 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Password *</label>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              {isSetupMode ? 'Set Strong Password (min 8 chars) *' : 'Password *'}
+            </label>
             <div className="relative">
               <Key className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
@@ -99,7 +147,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter admin password"
+                placeholder={isSetupMode ? 'Create strong administrator password' : 'Enter admin password'}
                 className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
               />
               <button
@@ -112,6 +160,23 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             </div>
           </div>
 
+          {isSetupMode && (
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Confirm Password *</label>
+              <div className="relative">
+                <Key className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Re-enter password"
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
+                />
+              </div>
+            </div>
+          )}
+
           <div className="pt-2">
             <button
               type="submit"
@@ -121,12 +186,12 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Authenticating...</span>
+                  <span>{isSetupMode ? 'Configuring Account...' : 'Authenticating...'}</span>
                 </>
               ) : (
                 <>
                   <ShieldCheck className="w-4 h-4" />
-                  <span>Sign In as Admin</span>
+                  <span>{isSetupMode ? 'Create Administrator & Enter' : 'Sign In as Admin'}</span>
                 </>
               )}
             </button>
@@ -135,10 +200,10 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
         <div className="mt-5 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-center">
           <p className="text-[11px] text-slate-500 font-medium">
-            Owner Account: <span className="font-mono text-slate-700 font-bold">abbas.aj@gmail.com</span>
+            Registered Owner Account: <span className="font-mono text-slate-700 font-bold">abbas.aj@gmail.com</span>
           </p>
           <p className="text-[10px] text-slate-400 mt-0.5">
-            Default initial password: <span className="font-mono font-bold text-indigo-600">AffiliateOS@2026</span>
+            PostgreSQL authenticated session with server-side revocation
           </p>
         </div>
       </div>

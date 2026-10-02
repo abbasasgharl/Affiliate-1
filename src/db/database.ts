@@ -1,8 +1,18 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import pg from 'pg';
-import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+import { db } from './index.ts';
+import {
+  users,
+  affiliatePrograms,
+  clicks,
+  visitorSessions,
+  reviews,
+  contactMessages,
+  notificationSettings,
+  notifications,
+  auditLogs,
+  healthChecks
+} from './schema.ts';
+import { eq, desc, and, or, sql, like, ilike } from 'drizzle-orm';
 import {
   AffiliateProgram,
   ClickRecord,
@@ -18,460 +28,578 @@ import {
 } from '../types.ts';
 import {
   INITIAL_PROGRAMS,
-  INITIAL_NOTIFICATION_SETTINGS,
-  INITIAL_NOTIFICATIONS
+  INITIAL_NOTIFICATION_SETTINGS
 } from '../data/seedData.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Database storage file path for local persistence / non-Postgres environments
-const DATA_DIR = path.resolve(__dirname, '../../data');
-const DATA_FILE = path.join(DATA_DIR, 'affiliateos-data.json');
-
-// Interface for internal persistent store
-interface DatabaseSchema {
-  users: AdminUser[];
-  programs: AffiliateProgram[];
-  clicks: ClickRecord[];
-  visitor_sessions: VisitorSession[];
-  reviews: UserReview[];
-  contact_messages: ContactMessage[];
-  notifications: NotificationLog[];
-  notification_settings: NotificationSettings;
-  audit_logs: AuditLog[];
-}
-
-// In-Memory mirror synced with persistent storage
-let memoryStore: DatabaseSchema;
-
-// Optional Postgres Pool
-let pgPool: pg.Pool | null = null;
-const DATABASE_URL = process.env.DATABASE_URL;
-
 /**
- * Initializes persistent database
+ * Initializes PostgreSQL database state, seeding initial programs and settings if empty.
+ * Never creates a hardcoded password in production.
  */
 export async function initDatabase(): Promise<void> {
-  // Ensure data directory exists
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  console.log('[Database] Initializing PostgreSQL connection...');
 
-  // Check if PostgreSQL is configured
-  if (DATABASE_URL) {
-    try {
-      console.log('[Database] Connecting to PostgreSQL instance...');
-      pgPool = new pg.Pool({ connectionString: DATABASE_URL });
-      await pgPool.query('SELECT NOW()');
-      console.log('[Database] PostgreSQL connected successfully.');
-    } catch (err: any) {
-      console.warn('[Database] PostgreSQL connection failed, falling back to ACID local storage:', err.message);
-      pgPool = null;
-    }
-  }
-
-  // Load from local persistent file or initialize new
-  if (fs.existsSync(DATA_FILE)) {
-    try {
-      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-      memoryStore = JSON.parse(raw);
-      console.log(`[Database] Loaded persistent state from disk (${memoryStore.programs.length} programs, ${memoryStore.users.length} users).`);
-    } catch (err) {
-      console.error('[Database] Failed to read database file, initializing default:', err);
-      await initDefaultState();
-    }
-  } else {
-    console.log('[Database] Initializing fresh database with seeded admin and verified programs...');
-    await initDefaultState();
-  }
-
-  // Ensure primary admin user exists with hashed password
-  await ensureDefaultAdmin();
-}
-
-/**
- * Creates default seed state
- */
-async function initDefaultState(): Promise<void> {
-  const defaultPasswordHash = await bcrypt.hash('AffiliateOS@2026', 10);
-
-  memoryStore = {
-    users: [
-      {
-        id: 'usr_super_1',
-        email: 'abbas.aj@gmail.com',
-        name: 'Abbas (Owner)',
-        role: 'super_admin',
-        password_hash: defaultPasswordHash,
-        status: 'active',
-        avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-        last_login: new Date().toISOString()
-      },
-      {
-        id: 'usr_editor_1',
-        email: 'editor@affiliateos.io',
-        name: 'Sarah Chen',
-        role: 'editor',
-        password_hash: defaultPasswordHash,
-        status: 'active',
-        avatar_url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&auto=format&fit=crop&q=80',
-        last_login: new Date(Date.now() - 3600000 * 4).toISOString()
-      }
-    ],
-    programs: [...INITIAL_PROGRAMS],
-    clicks: [], // Fresh real clicks only
-    visitor_sessions: [],
-    reviews: process.env.DEMO_MODE === 'true' ? [
-      {
-        id: 'rev_demo_1',
-        program_id: 'prog_nexcess',
-        program_name: 'Nexcess Managed Hosting',
-        user_name: 'Demo Reviewer',
-        rating: 5,
-        title: 'Demo Review — Not a real customer review',
-        comment: 'Sample evaluation review for development and testing verification.',
-        timestamp: new Date().toISOString(),
-        verified: false,
-        status: 'approved'
-      }
-    ] : [],
-    contact_messages: [
-      {
-        id: 'msg_1',
-        name: 'David Miller',
-        email: 'david.m@techagency.co',
-        subject: 'Question on Nexcess vs Plesk for high-traffic agency',
-        message: 'Hello, we manage 40 client sites and are deciding between Nexcess managed cloud and Plesk VPS. Which is optimal for auto-scaling?',
-        program_id: 'prog_nexcess',
-        timestamp: new Date(Date.now() - 3600000 * 5).toISOString(),
-        status: 'unread'
-      }
-    ],
-    notifications: [...INITIAL_NOTIFICATIONS],
-    notification_settings: {
-      ...INITIAL_NOTIFICATION_SETTINGS,
-      alert_email: 'abbas.aj@gmail.com'
-    },
-    audit_logs: [
-      {
-        id: `audit_${Date.now()}`,
-        user_id: 'usr_super_1',
-        user_email: 'abbas.aj@gmail.com',
-        action: 'system_initialized',
-        resource_type: 'system',
-        timestamp: new Date().toISOString(),
-        ip_hash: '127.0.0.1'
-      }
-    ]
-  };
-
-  saveToDisk();
-}
-
-/**
- * Ensures primary admin user exists and has a valid password hash
- */
-async function ensureDefaultAdmin(): Promise<void> {
-  const adminEmail = 'abbas.aj@gmail.com';
-  let admin = memoryStore.users.find(u => u.email.toLowerCase() === adminEmail);
-
-  if (!admin) {
-    const passwordHash = await bcrypt.hash('AffiliateOS@2026', 10);
-    admin = {
-      id: 'usr_super_1',
-      email: adminEmail,
-      name: 'Abbas (Owner)',
-      role: 'super_admin',
-      password_hash: passwordHash,
-      status: 'active',
-      last_login: new Date().toISOString()
-    };
-    memoryStore.users.unshift(admin);
-    saveToDisk();
-  } else if (!admin.password_hash) {
-    admin.password_hash = await bcrypt.hash('AffiliateOS@2026', 10);
-    saveToDisk();
-  }
-}
-
-/**
- * Persist current state to disk atomically
- */
-function saveToDisk(): void {
   try {
-    const tempFile = `${DATA_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(memoryStore, null, 2), 'utf-8');
-    fs.renameSync(tempFile, DATA_FILE);
-  } catch (err) {
-    console.error('[Database] Failed to write database state to disk:', err);
+    // 1. Ensure notification settings record exists
+    const existingSettings = await db.select().from(notificationSettings).limit(1);
+    if (existingSettings.length === 0) {
+      console.log('[Database] Seeding initial notification settings in PostgreSQL...');
+      await db.insert(notificationSettings).values({
+        id: 'default',
+        enableEmail: true,
+        alertEmail: 'abbas.aj@gmail.com',
+        rateLimitMode: 'instant',
+        smtpHost: '',
+        smtpPort: 587,
+        smtpUser: '',
+        smtpPass: '',
+        fromEmail: '',
+        webhookUrl: '',
+        enableWebhook: false
+      });
+    }
+
+    // 2. Ensure initial verified programs exist in PostgreSQL if table is empty
+    const existingPrograms = await db.select({ id: affiliatePrograms.id }).from(affiliatePrograms).limit(1);
+    if (existingPrograms.length === 0) {
+      console.log('[Database] Seeding initial partner programs in PostgreSQL...');
+      for (const p of INITIAL_PROGRAMS) {
+        await db.insert(affiliatePrograms).values({
+          id: p.id,
+          slug: p.cloaked_slug,
+          name: p.name,
+          description: p.ai_description || p.ai_brief || '',
+          category: p.category,
+          brandDomain: new URL(p.original_link).hostname.replace(/^www\./, ''),
+          affiliateUrl: p.original_link,
+          destinationUrl: p.original_link,
+          affiliateNetwork: 'Direct Partner',
+          commissionType: p.commission_type || 'unverified',
+          commissionValue: p.commission_value || null,
+          commissionStatus: p.commission_value ? 'verified' : 'unverified',
+          cookieDuration: p.cookie_duration_days ? `${p.cookie_duration_days} days` : null,
+          referralPerk: p.referral_perk || null,
+          status: p.status || 'active',
+          featured: Boolean(p.featured),
+          logoUrl: p.logo_url || null,
+          verificationStatus: 'verified',
+          lastVerifiedAt: new Date(),
+          healthStatus: p.health_status || 'healthy',
+          lastHealthCheck: new Date()
+        }).onConflictDoNothing();
+      }
+    }
+
+    const adminCheck = await hasAdminUser();
+    if (!adminCheck) {
+      console.log('[Database] No administrator registered yet. First-run secure setup is available.');
+    } else {
+      console.log('[Database] PostgreSQL database is ready with authoritative persistence.');
+    }
+  } catch (err: any) {
+    console.error('[Database] Failed to initialize PostgreSQL:', err);
+    throw err;
   }
 }
 
+/**
+ * Checks whether an administrator account has been set up
+ */
+export async function hasAdminUser(): Promise<boolean> {
+  const result = await db.select({ count: sql<number>`count(*)::int` })
+    .from(users)
+    .where(or(eq(users.role, 'super_admin'), eq(users.role, 'editor')));
+  return (result[0]?.count || 0) > 0;
+}
+
 // -----------------------------------------------------------------------------
-// USER OPERATIONS
+// POSTGRESQL AUTHORITATIVE DATABASE OPERATIONS
 // -----------------------------------------------------------------------------
-export const db = {
-  getUserByEmail(email: string): AdminUser | undefined {
-    return memoryStore.users.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
-  },
-
-  getUserById(id: string): AdminUser | undefined {
-    return memoryStore.users.find(u => u.id === id);
-  },
-
-  getAllUsers(): AdminUser[] {
-    // Return users without exposing password_hash
-    return memoryStore.users.map(({ password_hash, ...u }) => ({ ...u }));
-  },
-
-  async createUser(data: { name: string; email: string; role: AdminUser['role']; password?: string }): Promise<AdminUser> {
-    const existing = db.getUserByEmail(data.email);
-    if (existing) {
-      throw new Error(`User with email "${data.email}" already exists.`);
-    }
-
-    const passwordHash = await bcrypt.hash(data.password || 'AffiliateOS@2026', 10);
-
-    const newUser: AdminUser = {
-      id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      name: data.name.trim(),
-      email: data.email.toLowerCase().trim(),
-      role: data.role,
-      password_hash: passwordHash,
-      status: 'active',
-      last_login: new Date().toISOString()
+export const postgresDb = {
+  // USER OPERATIONS
+  async getUserByEmail(email: string): Promise<AdminUser | null> {
+    const rows = await db.select().from(users).where(eq(users.email, email.toLowerCase().trim())).limit(1);
+    if (rows.length === 0) return null;
+    const u = rows[0];
+    return {
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      role: u.role as AdminUser['role'],
+      password_hash: u.passwordHash || undefined,
+      status: u.status as any,
+      last_login: u.lastLoginAt?.toISOString()
     };
-
-    memoryStore.users.push(newUser);
-    saveToDisk();
-    const { password_hash, ...safeUser } = newUser;
-    return safeUser as AdminUser;
   },
 
-  updateUserLastLogin(id: string): void {
-    const user = memoryStore.users.find(u => u.id === id);
-    if (user) {
-      user.last_login = new Date().toISOString();
-      saveToDisk();
-    }
+  async getUserById(id: string): Promise<AdminUser | null> {
+    const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (rows.length === 0) return null;
+    const u = rows[0];
+    return {
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      role: u.role as AdminUser['role'],
+      password_hash: u.passwordHash || undefined,
+      status: u.status as any,
+      last_login: u.lastLoginAt?.toISOString()
+    };
   },
 
-  deleteUser(id: string): boolean {
-    const user = memoryStore.users.find(u => u.id === id);
+  async getAllUsers(): Promise<AdminUser[]> {
+    const rows = await db.select().from(users).orderBy(desc(users.createdAt));
+    return rows.map(u => ({
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      role: u.role as AdminUser['role'],
+      status: u.status as any,
+      last_login: u.lastLoginAt?.toISOString()
+    }));
+  },
+
+  async createUser(data: {
+    id?: string;
+    uid?: string;
+    name: string;
+    email: string;
+    role: AdminUser['role'];
+    passwordHash?: string;
+  }): Promise<AdminUser> {
+    const id = data.id || `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const cleanEmail = data.email.toLowerCase().trim();
+
+    const [newUser] = await db.insert(users).values({
+      id,
+      uid: data.uid,
+      name: data.name.trim(),
+      email: cleanEmail,
+      role: data.role,
+      passwordHash: data.passwordHash,
+      status: 'active',
+      lastLoginAt: new Date(),
+    }).returning();
+
+    return {
+      id: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role as AdminUser['role'],
+      status: newUser.status as any,
+      last_login: newUser.lastLoginAt?.toISOString()
+    };
+  },
+
+  async updateUserLastLogin(id: string): Promise<void> {
+    await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(users.id, id));
+  },
+
+  async updateUserRole(id: string, role: AdminUser['role']): Promise<void> {
+    await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, id));
+  },
+
+  async deleteUser(id: string): Promise<boolean> {
+    const user = await this.getUserById(id);
     if (!user) return false;
     if (user.email === 'abbas.aj@gmail.com') {
       throw new Error('Cannot delete the primary owner account (abbas.aj@gmail.com).');
     }
-    memoryStore.users = memoryStore.users.filter(u => u.id !== id);
-    saveToDisk();
+    await db.delete(users).where(eq(users.id, id));
     return true;
   },
 
-  // -----------------------------------------------------------------------------
   // PROGRAM OPERATIONS
-  // -----------------------------------------------------------------------------
-  getPrograms(category?: string, search?: string): AffiliateProgram[] {
-    let list = [...memoryStore.programs];
+  async getPrograms(category?: string, search?: string): Promise<AffiliateProgram[]> {
+    let conditions = [];
     if (category && category !== 'All') {
-      list = list.filter(p => p.category.toLowerCase() === category.toLowerCase());
+      conditions.push(eq(affiliatePrograms.category, category));
     }
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        p => p.name.toLowerCase().includes(q) ||
-             p.ai_description.toLowerCase().includes(q) ||
-             p.category.toLowerCase().includes(q)
-      );
+    if (search && search.trim()) {
+      const q = `%${search.trim().toLowerCase()}%`;
+      conditions.push(or(
+        ilike(affiliatePrograms.name, q),
+        ilike(affiliatePrograms.description, q),
+        ilike(affiliatePrograms.category, q),
+        ilike(affiliatePrograms.slug, q)
+      ));
     }
-    return list;
+
+    const rows = conditions.length > 0
+      ? await db.select().from(affiliatePrograms).where(and(...conditions)).orderBy(desc(affiliatePrograms.createdAt))
+      : await db.select().from(affiliatePrograms).orderBy(desc(affiliatePrograms.createdAt));
+
+    return rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      category: r.category,
+      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
+      original_link: r.affiliateUrl,
+      cloaked_slug: r.slug,
+      referral_perk: r.referralPerk || '',
+      cta_label: `Claim ${r.name} Deal`,
+      ai_generated_pick: r.description,
+      ai_description: r.description,
+      ai_brief: r.description,
+      commission_type: (r.commissionType as any) || 'unverified',
+      commission_value: r.commissionValue || 'Not verified',
+      cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
+      status: (r.status as any) || 'active',
+      health_status: (r.healthStatus as any) || 'healthy',
+      last_http_code: 200,
+      last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
+      key_selling_points: [
+        'Direct verified partner connection',
+        'Transparent referral disclosure',
+        'Continuous uptime & link monitoring'
+      ],
+      target_audience: 'Modern businesses, developers, and tech professionals',
+      tags: [r.category, r.name],
+      featured: r.featured,
+      date_added: r.createdAt.toISOString()
+    }));
   },
 
-  getProgramById(id: string): AffiliateProgram | undefined {
-    return memoryStore.programs.find(p => p.id === id);
+  async getProgramById(id: string): Promise<AffiliateProgram | null> {
+    const rows = await db.select().from(affiliatePrograms).where(eq(affiliatePrograms.id, id)).limit(1);
+    if (rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      id: r.id,
+      name: r.name,
+      category: r.category,
+      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
+      original_link: r.affiliateUrl,
+      cloaked_slug: r.slug,
+      referral_perk: r.referralPerk || '',
+      cta_label: `Claim ${r.name} Deal`,
+      ai_generated_pick: r.description,
+      ai_description: r.description,
+      ai_brief: r.description,
+      commission_type: (r.commissionType as any) || 'unverified',
+      commission_value: r.commissionValue || 'Not verified',
+      cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
+      status: (r.status as any) || 'active',
+      health_status: (r.healthStatus as any) || 'healthy',
+      last_http_code: 200,
+      last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
+      key_selling_points: [
+        'Direct verified partner connection',
+        'Transparent referral disclosure',
+        'Continuous uptime & link monitoring'
+      ],
+      target_audience: 'Modern businesses, developers, and tech professionals',
+      tags: [r.category, r.name],
+      featured: r.featured,
+      date_added: r.createdAt.toISOString()
+    };
   },
 
-  getProgramBySlug(slug: string): AffiliateProgram | undefined {
-    return memoryStore.programs.find(p => p.cloaked_slug.toLowerCase() === slug.toLowerCase().trim());
+  async getProgramBySlug(slug: string): Promise<AffiliateProgram | null> {
+    const cleanSlug = slug.toLowerCase().trim();
+    const rows = await db.select().from(affiliatePrograms).where(eq(affiliatePrograms.slug, cleanSlug)).limit(1);
+    if (rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      id: r.id,
+      name: r.name,
+      category: r.category,
+      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
+      original_link: r.affiliateUrl,
+      cloaked_slug: r.slug,
+      referral_perk: r.referralPerk || '',
+      cta_label: `Claim ${r.name} Deal`,
+      ai_generated_pick: r.description,
+      ai_description: r.description,
+      ai_brief: r.description,
+      commission_type: (r.commissionType as any) || 'unverified',
+      commission_value: r.commissionValue || 'Not verified',
+      cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
+      status: (r.status as any) || 'active',
+      health_status: (r.healthStatus as any) || 'healthy',
+      last_http_code: 200,
+      last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
+      key_selling_points: [
+        'Direct verified partner connection',
+        'Transparent referral disclosure',
+        'Continuous uptime & link monitoring'
+      ],
+      target_audience: 'Modern businesses, developers, and tech professionals',
+      tags: [r.category, r.name],
+      featured: r.featured,
+      date_added: r.createdAt.toISOString()
+    };
   },
 
-  createProgram(program: AffiliateProgram): AffiliateProgram {
-    const slugExists = memoryStore.programs.some(p => p.cloaked_slug.toLowerCase() === program.cloaked_slug.toLowerCase());
-    if (slugExists) {
-      throw new Error(`Cloaked slug "${program.cloaked_slug}" is already in use.`);
+  async createProgram(program: AffiliateProgram): Promise<AffiliateProgram> {
+    const slug = (program.cloaked_slug || '').toLowerCase().trim();
+    const existing = await db.select({ id: affiliatePrograms.id }).from(affiliatePrograms).where(eq(affiliatePrograms.slug, slug)).limit(1);
+    if (existing.length > 0) {
+      throw new Error(`Cloaked slug "${slug}" is already in use.`);
     }
-    memoryStore.programs.unshift(program);
-    saveToDisk();
-    return program;
+
+    let brandDomain = 'partner.io';
+    try {
+      brandDomain = new URL(program.original_link).hostname.replace(/^www\./, '');
+    } catch {}
+
+    const id = program.id || `prog_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+
+    await db.insert(affiliatePrograms).values({
+      id,
+      slug,
+      name: program.name.trim(),
+      description: program.ai_description || program.ai_brief || program.ai_generated_pick || '',
+      category: program.category || 'Tools',
+      brandDomain,
+      affiliateUrl: program.original_link,
+      destinationUrl: program.original_link,
+      affiliateNetwork: 'Direct',
+      commissionType: program.commission_type || 'unverified',
+      commissionValue: program.commission_value || null,
+      commissionStatus: program.commission_value && program.commission_value !== 'Not verified' ? 'verified' : 'unverified',
+      cookieDuration: program.cookie_duration_days ? `${program.cookie_duration_days} days` : null,
+      referralPerk: program.referral_perk || null,
+      status: program.status || 'active',
+      featured: Boolean(program.featured),
+      logoUrl: program.logo_url || null,
+      verificationStatus: 'verified',
+      lastVerifiedAt: new Date(),
+      healthStatus: program.health_status || 'healthy',
+      lastHealthCheck: new Date()
+    });
+
+    const created = await this.getProgramById(id);
+    return created!;
   },
 
-  updateProgram(id: string, updates: Partial<AffiliateProgram>): AffiliateProgram {
-    const index = memoryStore.programs.findIndex(p => p.id === id);
-    if (index === -1) throw new Error('Program not found');
+  async updateProgram(id: string, updates: Partial<AffiliateProgram>): Promise<AffiliateProgram> {
+    const existing = await this.getProgramById(id);
+    if (!existing) throw new Error('Program not found');
 
-    if (updates.cloaked_slug && updates.cloaked_slug !== memoryStore.programs[index].cloaked_slug) {
-      const slugConflict = memoryStore.programs.some(p => p.id !== id && p.cloaked_slug.toLowerCase() === updates.cloaked_slug!.toLowerCase());
-      if (slugConflict) {
+    if (updates.cloaked_slug && updates.cloaked_slug !== existing.cloaked_slug) {
+      const slugConflict = await db.select({ id: affiliatePrograms.id })
+        .from(affiliatePrograms)
+        .where(and(eq(affiliatePrograms.slug, updates.cloaked_slug.toLowerCase().trim()), sql`${affiliatePrograms.id} != ${id}`))
+        .limit(1);
+      if (slugConflict.length > 0) {
         throw new Error(`Slug "${updates.cloaked_slug}" is already in use.`);
       }
     }
 
-    memoryStore.programs[index] = {
-      ...memoryStore.programs[index],
-      ...updates,
-      id
-    };
-    saveToDisk();
-    return memoryStore.programs[index];
+    const setValues: Record<string, any> = { updatedAt: new Date() };
+    if (updates.name !== undefined) setValues.name = updates.name;
+    if (updates.category !== undefined) setValues.category = updates.category;
+    if (updates.cloaked_slug !== undefined) setValues.slug = updates.cloaked_slug.toLowerCase().trim();
+    if (updates.original_link !== undefined) {
+      setValues.affiliateUrl = updates.original_link;
+      setValues.destinationUrl = updates.original_link;
+    }
+    if (updates.referral_perk !== undefined) setValues.referralPerk = updates.referral_perk;
+    if (updates.ai_description !== undefined) setValues.description = updates.ai_description;
+    if (updates.commission_type !== undefined) setValues.commissionType = updates.commission_type;
+    if (updates.commission_value !== undefined) setValues.commissionValue = updates.commission_value;
+    if (updates.status !== undefined) setValues.status = updates.status;
+    if (updates.featured !== undefined) setValues.featured = updates.featured;
+    if (updates.health_status !== undefined) setValues.healthStatus = updates.health_status;
+    if (updates.logo_url !== undefined) setValues.logoUrl = updates.logo_url;
+
+    await db.update(affiliatePrograms).set(setValues).where(eq(affiliatePrograms.id, id));
+    const updated = await this.getProgramById(id);
+    return updated!;
   },
 
-  deleteProgram(id: string): boolean {
-    const initialLen = memoryStore.programs.length;
-    memoryStore.programs = memoryStore.programs.filter(p => p.id !== id);
-    saveToDisk();
-    return memoryStore.programs.length < initialLen;
+  async deleteProgram(id: string): Promise<boolean> {
+    const res = await db.delete(affiliatePrograms).where(eq(affiliatePrograms.id, id)).returning({ id: affiliatePrograms.id });
+    return res.length > 0;
   },
 
-  // -----------------------------------------------------------------------------
   // CLICK OPERATIONS
-  // -----------------------------------------------------------------------------
-  recordClick(click: ClickRecord): void {
-    memoryStore.clicks.unshift(click);
-    // Limit to latest 10,000 clicks
-    if (memoryStore.clicks.length > 10000) {
-      memoryStore.clicks.pop();
-    }
-    saveToDisk();
+  async recordClick(click: ClickRecord): Promise<void> {
+    await db.insert(clicks).values({
+      id: click.id,
+      programId: click.program_id,
+      programName: click.program_name,
+      cloakedSlug: click.cloaked_slug,
+      timestamp: new Date(click.timestamp || Date.now()),
+      referrerDomain: click.referrer_domain || 'direct',
+      userAgent: click.user_agent || null,
+      deviceType: click.device_type || 'unknown',
+      browser: click.browser || null,
+      country: click.country || 'Global',
+      ipHash: click.ip_hash,
+      destinationUrl: click.referrer_url || '',
+      isPreview: false
+    });
   },
 
-  getClicks(programId?: string, limit = 100): ClickRecord[] {
-    let list = memoryStore.clicks;
-    if (programId) {
-      list = list.filter(c => c.program_id === programId);
-    }
-    return list.slice(0, limit);
+  async getClicks(programId?: string, limit = 100): Promise<ClickRecord[]> {
+    const conditions = programId ? [eq(clicks.programId, programId)] : [];
+    const rows = conditions.length > 0
+      ? await db.select().from(clicks).where(and(...conditions)).orderBy(desc(clicks.timestamp)).limit(limit)
+      : await db.select().from(clicks).orderBy(desc(clicks.timestamp)).limit(limit);
+
+    return rows.map(c => ({
+      id: c.id,
+      program_id: c.programId,
+      program_name: c.programName,
+      cloaked_slug: c.cloakedSlug,
+      timestamp: c.timestamp.toISOString(),
+      ip_hash: c.ipHash,
+      user_agent: c.userAgent || 'Unknown',
+      referrer_domain: c.referrerDomain || 'direct',
+      device_type: (c.deviceType as any) || 'unknown',
+      browser: c.browser || 'Unknown',
+      country: c.country || 'Global'
+    }));
   },
 
-  clearAllClicks(): number {
-    const count = memoryStore.clicks.length;
-    memoryStore.clicks = [];
-    saveToDisk();
-    return count;
+  async clearAllClicks(): Promise<number> {
+    const res = await db.delete(clicks).returning({ id: clicks.id });
+    return res.length;
   },
 
-  // -----------------------------------------------------------------------------
   // VISITOR TRACKING
-  // -----------------------------------------------------------------------------
-  recordVisitorSession(sessionId: string, ipHash: string, landingPage?: string, referrer?: string, device?: DeviceType): boolean {
-    const existing = memoryStore.visitor_sessions.find(v => v.session_id === sessionId || (v.ip_hash === ipHash && Date.now() - new Date(v.last_seen).getTime() < 1800000));
+  async recordVisitorSession(sessionId: string, ipHash: string, userAgent?: string): Promise<boolean> {
+    const existing = await db.select({ id: visitorSessions.id, lastSeenAt: visitorSessions.lastSeenAt, pageViews: visitorSessions.pageViews })
+      .from(visitorSessions)
+      .where(or(
+        eq(visitorSessions.sessionId, sessionId),
+        and(
+          eq(visitorSessions.ipHash, ipHash),
+          sql`${visitorSessions.lastSeenAt} > NOW() - INTERVAL '30 minutes'`
+        )
+      ))
+      .limit(1);
 
-    if (existing) {
-      existing.last_seen = new Date().toISOString();
-      return false; // not a new visitor session
+    if (existing.length > 0) {
+      await db.update(visitorSessions)
+        .set({
+          lastSeenAt: new Date(),
+          pageViews: (existing[0].pageViews || 1) + 1
+        })
+        .where(eq(visitorSessions.id, existing[0].id));
+      return false; // returning visitor session
     }
 
-    const session: VisitorSession = {
-      id: `vis_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      session_id: sessionId,
-      ip_hash: ipHash,
-      first_seen: new Date().toISOString(),
-      last_seen: new Date().toISOString(),
-      landing_page: landingPage,
-      referrer: referrer,
-      device: device || 'desktop'
-    };
+    const id = `vis_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    await db.insert(visitorSessions).values({
+      id,
+      sessionId,
+      ipHash,
+      userAgent: userAgent || null,
+      pageViews: 1,
+      firstSeenAt: new Date(),
+      lastSeenAt: new Date()
+    });
 
-    memoryStore.visitor_sessions.unshift(session);
-    if (memoryStore.visitor_sessions.length > 5000) memoryStore.visitor_sessions.pop();
-    saveToDisk();
     return true; // new unique visitor
   },
 
-  getVisitorCount(): { total: number; today: number } {
-    const todayStr = new Date().toISOString().split('T')[0];
-    const total = memoryStore.visitor_sessions.length;
-    const today = memoryStore.visitor_sessions.filter(v => v.first_seen.startsWith(todayStr)).length;
-    return { total: Math.max(total, 1), today };
+  async getVisitorCount(): Promise<{ total: number; today: number }> {
+    const totalRes = await db.select({ count: sql<number>`count(*)::int` }).from(visitorSessions);
+    const todayRes = await db.select({ count: sql<number>`count(*)::int` })
+      .from(visitorSessions)
+      .where(sql`${visitorSessions.firstSeenAt} >= CURRENT_DATE`);
+
+    const total = totalRes[0]?.count || 0;
+    const today = todayRes[0]?.count || 0;
+    return { total: Math.max(total, 0), today };
   },
 
-  // -----------------------------------------------------------------------------
-  // REAL ANALYTICS (BASED ON REAL DATABASE EVENTS, NO FAKE MULTIPLIERS)
-  // -----------------------------------------------------------------------------
-  getAnalytics(): AnalyticsSummary {
-    const totalClicks = memoryStore.clicks.length;
-    const uniqueIps = new Set(memoryStore.clicks.map(c => c.ip_hash));
-    const uniqueClicks = uniqueIps.size;
+  // ANALYTICS (REAL DATABASE EVENTS ONLY — NO FAKE METRICS)
+  async getAnalytics(): Promise<AnalyticsSummary> {
+    const totalClicksRes = await db.select({ count: sql<number>`count(*)::int` }).from(clicks);
+    const totalClicks = totalClicksRes[0]?.count || 0;
 
-    const { total: totalVisitors, today: todayVisitors } = db.getVisitorCount();
+    const uniqueClicksRes = await db.select({ count: sql<number>`count(DISTINCT ${clicks.ipHash})::int` }).from(clicks);
+    const uniqueClicks = uniqueClicksRes[0]?.count || 0;
 
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const todayClicks = memoryStore.clicks.filter(c => c.timestamp.startsWith(todayStr)).length;
+    const { total: totalVisitors, today: todayVisitors } = await this.getVisitorCount();
 
-    // True CTR: Total Clicks / Total Unique Visitors
+    const todayClicksRes = await db.select({ count: sql<number>`count(*)::int` })
+      .from(clicks)
+      .where(sql`${clicks.timestamp} >= CURRENT_DATE`);
+    const todayClicks = todayClicksRes[0]?.count || 0;
+
     const clickThroughRate = totalVisitors > 0
       ? Math.round((totalClicks / totalVisitors) * 1000) / 10
       : 0;
 
     // Top programs by real clicks
-    const programClicksMap: Record<string, number> = {};
-    memoryStore.clicks.forEach(c => {
-      programClicksMap[c.program_id] = (programClicksMap[c.program_id] || 0) + 1;
-    });
+    const topProgramsRes = await db.select({
+      id: affiliatePrograms.id,
+      name: affiliatePrograms.name,
+      slug: affiliatePrograms.slug,
+      commission_value: affiliatePrograms.commissionValue,
+      health_status: affiliatePrograms.healthStatus,
+      clicks: sql<number>`count(${clicks.id})::int`
+    })
+    .from(affiliatePrograms)
+    .leftJoin(clicks, eq(affiliatePrograms.id, clicks.programId))
+    .groupBy(affiliatePrograms.id, affiliatePrograms.name, affiliatePrograms.slug, affiliatePrograms.commissionValue, affiliatePrograms.healthStatus)
+    .orderBy(desc(sql`count(${clicks.id})`))
+    .limit(10);
 
-    const topPrograms = memoryStore.programs
-      .map(p => ({
-        id: p.id,
-        name: p.name,
-        slug: p.cloaked_slug,
-        clicks: programClicksMap[p.id] || 0,
-        commission_value: p.commission_value,
-        health_status: p.health_status
-      }))
-      .sort((a, b) => b.clicks - a.clicks)
-      .slice(0, 10);
+    const topPrograms = topProgramsRes.map(p => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      clicks: p.clicks,
+      commission_value: p.commission_value || 'Not verified',
+      health_status: p.health_status as HealthStatus
+    }));
 
-    // Clicks and visitors over last 7 days
+    // Clicks and visitors over last 7 days from PostgreSQL
     const clicksOverTime = [];
+    const now = new Date();
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now.getTime() - i * 86400000);
       const dateStr = d.toISOString().split('T')[0];
       const dayLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-      const dayClicks = memoryStore.clicks.filter(c => c.timestamp.startsWith(dateStr)).length;
-      const dayVisitors = memoryStore.visitor_sessions.filter(v => v.first_seen.startsWith(dateStr)).length;
+
+      const dayClicksRes = await db.select({ count: sql<number>`count(*)::int` })
+        .from(clicks)
+        .where(sql`DATE(${clicks.timestamp}) = ${dateStr}::date`);
+      const dayVisitorsRes = await db.select({ count: sql<number>`count(*)::int` })
+        .from(visitorSessions)
+        .where(sql`DATE(${visitorSessions.firstSeenAt}) = ${dateStr}::date`);
 
       clicksOverTime.push({
         date: dateStr,
         label: dayLabel,
-        clicks: dayClicks,
-        visitors: dayVisitors
+        clicks: dayClicksRes[0]?.count || 0,
+        visitors: dayVisitorsRes[0]?.count || 0
       });
     }
 
     // Traffic sources from clicks
-    const referrerMap: Record<string, number> = {};
-    memoryStore.clicks.forEach(c => {
-      const domain = c.referrer_domain || 'Direct';
-      referrerMap[domain] = (referrerMap[domain] || 0) + 1;
-    });
+    const referrerRes = await db.select({
+      domain: sql<string>`COALESCE(${clicks.referrerDomain}, 'direct')`,
+      count: sql<number>`count(*)::int`
+    })
+    .from(clicks)
+    .groupBy(sql`COALESCE(${clicks.referrerDomain}, 'direct')`)
+    .orderBy(desc(sql`count(*)`))
+    .limit(6);
 
-    const referrerBreakdown = Object.entries(referrerMap)
-      .map(([domain, count]) => ({
-        domain,
-        clicks: count,
-        percentage: totalClicks > 0 ? Math.round((count / totalClicks) * 100) : 0
-      }))
-      .sort((a, b) => b.clicks - a.clicks)
-      .slice(0, 6);
+    const referrerBreakdown = referrerRes.map(r => ({
+      domain: r.domain,
+      clicks: r.count,
+      percentage: totalClicks > 0 ? Math.round((r.count / totalClicks) * 100) : 0
+    }));
 
     // Devices
-    const deviceMap: Record<DeviceType, number> = { desktop: 0, mobile: 0, tablet: 0 };
-    memoryStore.clicks.forEach(c => {
-      if (deviceMap[c.device_type] !== undefined) {
-        deviceMap[c.device_type]++;
-      } else {
-        deviceMap.desktop++;
-      }
+    const deviceRes = await db.select({
+      device: sql<string>`COALESCE(${clicks.deviceType}, 'desktop')`,
+      count: sql<number>`count(*)::int`
+    })
+    .from(clicks)
+    .groupBy(sql`COALESCE(${clicks.deviceType}, 'desktop')`);
+
+    const deviceMap: Record<string, number> = { desktop: 0, mobile: 0, tablet: 0 };
+    deviceRes.forEach(r => {
+      const dev = r.device === 'mobile' || r.device === 'tablet' ? r.device : 'desktop';
+      deviceMap[dev] = (deviceMap[dev] || 0) + r.count;
     });
 
     const deviceBreakdown = (['desktop', 'mobile', 'tablet'] as DeviceType[]).map(dev => ({
@@ -480,11 +608,8 @@ export const db = {
       percentage: totalClicks > 0 ? Math.round((deviceMap[dev] / totalClicks) * 100) : 0
     }));
 
-    const healthyLinksCount = memoryStore.programs.filter(p => p.health_status === 'healthy').length;
-    const brokenLinksCount = memoryStore.programs.filter(p => p.health_status === 'broken').length;
-
-    // Conservative estimated commission based on actual recorded clicks
-    const estimatedRevenue = Math.round(totalClicks * 1.85);
+    const healthyRes = await db.select({ count: sql<number>`count(*)::int` }).from(affiliatePrograms).where(eq(affiliatePrograms.healthStatus, 'healthy'));
+    const brokenRes = await db.select({ count: sql<number>`count(*)::int` }).from(affiliatePrograms).where(eq(affiliatePrograms.healthStatus, 'down'));
 
     return {
       totalVisitors,
@@ -493,9 +618,9 @@ export const db = {
       clickThroughRate,
       todayVisitors,
       todayClicks,
-      estimatedRevenue,
-      healthyLinksCount,
-      brokenLinksCount,
+      estimatedRevenue: 0, // Real revenue: 0 until verified conversion reports are integrated
+      healthyLinksCount: healthyRes[0]?.count || 0,
+      brokenLinksCount: brokenRes[0]?.count || 0,
       topPrograms,
       clicksOverTime,
       referrerBreakdown,
@@ -503,132 +628,227 @@ export const db = {
     };
   },
 
-  // -----------------------------------------------------------------------------
-  // REVIEWS OPERATIONS
-  // -----------------------------------------------------------------------------
-  getReviews(programId?: string, status?: UserReview['status']): UserReview[] {
-    let list = memoryStore.reviews;
-    if (programId) list = list.filter(r => r.program_id === programId);
-    if (status) list = list.filter(r => r.status === status);
-    return list;
+  // REVIEWS OPERATIONS (Public users ONLY see status = 'approved')
+  async getReviews(programId?: string, status?: UserReview['status']): Promise<UserReview[]> {
+    let conditions = [];
+    if (programId) conditions.push(eq(reviews.programId, programId));
+    if (status) conditions.push(eq(reviews.status, status));
+
+    const rows = conditions.length > 0
+      ? await db.select().from(reviews).where(and(...conditions)).orderBy(desc(reviews.createdAt))
+      : await db.select().from(reviews).orderBy(desc(reviews.createdAt));
+
+    return rows.map(r => ({
+      id: r.id,
+      program_id: r.programId,
+      program_name: 'Affiliate Partner',
+      user_name: r.userName,
+      rating: r.rating,
+      comment: r.comment,
+      timestamp: r.createdAt.toISOString(),
+      verified: r.verified,
+      status: r.status as UserReview['status']
+    }));
   },
 
-  createReview(data: Omit<UserReview, 'id' | 'timestamp' | 'status' | 'verified'>): UserReview {
-    const newRev: UserReview = {
-      id: `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      ...data,
-      timestamp: new Date().toISOString(),
-      verified: false, // New reviews start unverified until admin approves
-      status: 'pending' // Enforces human moderation workflow before publishing
+  async createReview(data: { program_id: string; user_name: string; user_email?: string; rating: number; comment: string }): Promise<UserReview> {
+    const id = `rev_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const [newRev] = await db.insert(reviews).values({
+      id,
+      programId: data.program_id,
+      userName: data.user_name.trim(),
+      userEmail: data.user_email?.trim() || null,
+      rating: data.rating,
+      comment: data.comment.trim(),
+      status: 'pending', // Moderation required
+      verified: false
+    }).returning();
+
+    return {
+      id: newRev.id,
+      program_id: newRev.programId,
+      user_name: newRev.userName,
+      rating: newRev.rating,
+      comment: newRev.comment,
+      timestamp: newRev.createdAt.toISOString(),
+      verified: newRev.verified,
+      status: 'pending'
     };
-    memoryStore.reviews.unshift(newRev);
-    saveToDisk();
-    return newRev;
   },
 
-  updateReviewStatus(id: string, status: UserReview['status'], verified = false): boolean {
-    const rev = memoryStore.reviews.find(r => r.id === id);
-    if (!rev) return false;
-    rev.status = status;
-    rev.verified = verified;
-    saveToDisk();
-    return true;
+  async updateReviewStatus(id: string, status: UserReview['status'], verified = false): Promise<boolean> {
+    const res = await db.update(reviews)
+      .set({ status, verified, updatedAt: new Date() })
+      .where(eq(reviews.id, id))
+      .returning({ id: reviews.id });
+    return res.length > 0;
   },
 
-  deleteReview(id: string): boolean {
-    const initialLen = memoryStore.reviews.length;
-    memoryStore.reviews = memoryStore.reviews.filter(r => r.id !== id);
-    saveToDisk();
-    return memoryStore.reviews.length < initialLen;
+  async deleteReview(id: string): Promise<boolean> {
+    const res = await db.delete(reviews).where(eq(reviews.id, id)).returning({ id: reviews.id });
+    return res.length > 0;
   },
 
-  // -----------------------------------------------------------------------------
   // CONTACT MESSAGES OPERATIONS
-  // -----------------------------------------------------------------------------
-  getContactMessages(): ContactMessage[] {
-    return memoryStore.contact_messages;
+  async getContactMessages(): Promise<ContactMessage[]> {
+    const rows = await db.select().from(contactMessages).orderBy(desc(contactMessages.createdAt));
+    return rows.map(m => ({
+      id: m.id,
+      name: m.name,
+      email: m.email,
+      subject: m.subject,
+      message: m.message,
+      timestamp: m.createdAt.toISOString(),
+      status: m.status as ContactMessage['status']
+    }));
   },
 
-  createContactMessage(data: Omit<ContactMessage, 'id' | 'timestamp' | 'status'>): ContactMessage {
-    const msg: ContactMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      ...data,
-      timestamp: new Date().toISOString(),
+  async createContactMessage(data: { name: string; email: string; subject: string; message: string; program_id?: string }): Promise<ContactMessage> {
+    const id = `msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const [newMsg] = await db.insert(contactMessages).values({
+      id,
+      name: data.name.trim(),
+      email: data.email.trim(),
+      subject: data.subject.trim(),
+      message: data.message.trim(),
+      status: 'unread'
+    }).returning();
+
+    return {
+      id: newMsg.id,
+      name: newMsg.name,
+      email: newMsg.email,
+      subject: newMsg.subject,
+      message: newMsg.message,
+      timestamp: newMsg.createdAt.toISOString(),
       status: 'unread'
     };
-    memoryStore.contact_messages.unshift(msg);
-    saveToDisk();
-    return msg;
   },
 
-  markContactMessageRead(id: string): boolean {
-    const msg = memoryStore.contact_messages.find(m => m.id === id);
-    if (!msg) return false;
-    msg.status = 'read';
-    saveToDisk();
-    return true;
+  async markContactMessageRead(id: string): Promise<boolean> {
+    const res = await db.update(contactMessages)
+      .set({ status: 'read' })
+      .where(eq(contactMessages.id, id))
+      .returning({ id: contactMessages.id });
+    return res.length > 0;
   },
 
-  deleteContactMessage(id: string): boolean {
-    const initialLen = memoryStore.contact_messages.length;
-    memoryStore.contact_messages = memoryStore.contact_messages.filter(m => m.id !== id);
-    saveToDisk();
-    return memoryStore.contact_messages.length < initialLen;
+  async deleteContactMessage(id: string): Promise<boolean> {
+    const res = await db.delete(contactMessages).where(eq(contactMessages.id, id)).returning({ id: contactMessages.id });
+    return res.length > 0;
   },
 
-  clearAllContactMessages(): number {
-    const count = memoryStore.contact_messages.length;
-    memoryStore.contact_messages = [];
-    saveToDisk();
-    return count;
+  async clearAllContactMessages(): Promise<number> {
+    const res = await db.delete(contactMessages).returning({ id: contactMessages.id });
+    return res.length;
   },
 
-  // -----------------------------------------------------------------------------
-  // NOTIFICATIONS OPERATIONS
-  // -----------------------------------------------------------------------------
-  getNotifications(): { settings: NotificationSettings; history: NotificationLog[] } {
+  // NOTIFICATION SETTINGS & LOGS
+  async getNotifications(): Promise<{ settings: NotificationSettings; history: NotificationLog[] }> {
+    const settingsRows = await db.select().from(notificationSettings).limit(1);
+    const settings = settingsRows[0] || {
+      enableEmail: true,
+      alertEmail: 'abbas.aj@gmail.com',
+      rateLimitMode: 'instant',
+      smtpHost: '',
+      smtpPort: 587,
+      smtpUser: '',
+      smtpPass: '',
+      fromEmail: '',
+      webhookUrl: '',
+      enableWebhook: false
+    };
+
+    const historyRows = await db.select().from(notifications).orderBy(desc(notifications.createdAt)).limit(50);
+    const history = historyRows.map(n => ({
+      id: n.id,
+      program_name: n.type,
+      channel: n.channel as any,
+      sent_status: n.status as any,
+      timestamp: n.createdAt.toISOString(),
+      message: n.message
+    }));
+
     return {
-      settings: memoryStore.notification_settings,
-      history: memoryStore.notifications.slice(0, 50)
+      settings: {
+        enable_email: settings.enableEmail,
+        alert_email: settings.alertEmail,
+        rate_limit_mode: settings.rateLimitMode as any,
+        smtp_host: settings.smtpHost || '',
+        smtp_port: settings.smtpPort || 587,
+        smtp_user: settings.smtpUser || '',
+        smtp_pass: settings.smtpPass || '',
+        from_email: settings.fromEmail || '',
+        webhook_url: settings.webhookUrl || '',
+        enable_webhook: settings.enableWebhook
+      },
+      history
     };
   },
 
-  addNotification(notif: NotificationLog): void {
-    memoryStore.notifications.unshift(notif);
-    if (memoryStore.notifications.length > 200) memoryStore.notifications.pop();
-    saveToDisk();
+  async addNotification(notif: NotificationLog): Promise<void> {
+    await db.insert(notifications).values({
+      id: notif.id,
+      type: notif.program_name || 'System Alert',
+      channel: notif.channel,
+      target: notif.channel === 'email' ? 'Admin Email' : 'Webhook',
+      status: notif.sent_status === 'sent' ? 'delivered' : 'failed',
+      message: notif.message
+    });
   },
 
-  updateNotificationSettings(updates: Partial<NotificationSettings>): NotificationSettings {
-    memoryStore.notification_settings = {
-      ...memoryStore.notification_settings,
-      ...updates
-    };
-    saveToDisk();
-    return memoryStore.notification_settings;
+  async updateNotificationSettings(updates: Partial<NotificationSettings>): Promise<NotificationSettings> {
+    const setValues: Record<string, any> = { updatedAt: new Date() };
+    if (updates.enable_email !== undefined) setValues.enableEmail = updates.enable_email;
+    if (updates.alert_email !== undefined) setValues.alertEmail = updates.alert_email;
+    if (updates.rate_limit_mode !== undefined) setValues.rateLimitMode = updates.rate_limit_mode;
+    if (updates.smtp_host !== undefined) setValues.smtpHost = updates.smtp_host;
+    if (updates.smtp_port !== undefined) setValues.smtpPort = updates.smtp_port;
+    if (updates.smtp_user !== undefined) setValues.smtpUser = updates.smtp_user;
+    if (updates.smtp_pass !== undefined) setValues.smtpPass = updates.smtp_pass;
+    if (updates.from_email !== undefined) setValues.fromEmail = updates.from_email;
+    if (updates.webhook_url !== undefined) setValues.webhookUrl = updates.webhook_url;
+    if (updates.enable_webhook !== undefined) setValues.enableWebhook = updates.enable_webhook;
+
+    await db.update(notificationSettings).set(setValues).where(eq(notificationSettings.id, 'default'));
+    const { settings } = await this.getNotifications();
+    return settings;
   },
 
-  // -----------------------------------------------------------------------------
   // AUDIT LOGS
-  // -----------------------------------------------------------------------------
-  logAuditEvent(userId: string, userEmail: string, action: string, resourceType: string, resourceId?: string, metadata?: Record<string, any>, ipHash = '127.0.0.1'): void {
-    const entry: AuditLog = {
-      id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      user_id: userId,
-      user_email: userEmail,
-      action,
-      resource_type: resourceType,
-      resource_id: resourceId,
-      metadata,
-      timestamp: new Date().toISOString(),
-      ip_hash: ipHash
-    };
-    memoryStore.audit_logs.unshift(entry);
-    if (memoryStore.audit_logs.length > 1000) memoryStore.audit_logs.pop();
-    saveToDisk();
+  async logAuditEvent(userId: string, userEmail: string, action: string, resourceType: string, resourceId?: string, metadata?: Record<string, any>, ipHash = '127.0.0.1'): Promise<void> {
+    const id = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    try {
+      await db.insert(auditLogs).values({
+        id,
+        userId,
+        userEmail,
+        action,
+        resourceType,
+        resourceId: resourceId || null,
+        metadata: metadata ? JSON.stringify(metadata) : null,
+        ipHash
+      });
+    } catch (err) {
+      console.error('[Audit] Failed to record audit log:', err);
+    }
   },
 
-  getAuditLogs(limit = 100): AuditLog[] {
-    return memoryStore.audit_logs.slice(0, limit);
+  async getAuditLogs(limit = 100): Promise<AuditLog[]> {
+    const rows = await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(limit);
+    return rows.map(r => ({
+      id: r.id,
+      user_id: r.userId || 'system',
+      user_email: r.userEmail || 'system',
+      action: r.action,
+      resource_type: r.resourceType,
+      resource_id: r.resourceId || undefined,
+      metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
+      timestamp: r.createdAt.toISOString(),
+      ip_hash: r.ipHash || '127.0.0.1'
+    }));
   }
 };
+
+export const db_instance = postgresDb;
+export { postgresDb as db };

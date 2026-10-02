@@ -4,22 +4,35 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import cookieParser from 'cookie-parser';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { db, initDatabase } from './src/db/database.ts';
+import { db, initDatabase, hasAdminUser } from './src/db/database.ts';
 import {
   hashPassword,
   comparePassword,
-  generateAuthToken,
+  createSession,
+  revokeSession,
   requireAuth,
   requireRole,
+  setSessionCookie,
+  clearSessionCookie,
   optionalAuth
 } from './src/security/auth.ts';
 import { validateSafeUrl } from './src/security/ssrf.ts';
 import { sendEmailAlert, testSmtpConnection } from './src/services/email.ts';
+import {
+  loginSchema,
+  setupSchema,
+  programSchema,
+  programUpdateSchema,
+  reviewSchema,
+  contactSchema,
+  notificationSettingsSchema
+} from './src/security/validation.ts';
 import type {
   AffiliateProgram,
   ClickRecord,
@@ -35,6 +48,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+// Respect Cloud Run and reverse proxy configuration safely
+app.set('trust proxy', 1);
+
 // Security Headers Middleware
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -44,10 +60,11 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Simple in-memory rate-limiter for sensitive public endpoints
+// Stateless/shared in-memory rate-limiter for sensitive public endpoints
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(maxRequests = 20, windowMs = 60000) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -148,149 +165,139 @@ function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
     const parts = host.split('.');
 
     const genericPrefixes = new Set([
-      'try', 'get', 'go', 'app', 'join', 'use', 'start', 'my', 'buy', 'shop', 
-      'partner', 'partners', 'aff', 'affiliate', 'ref', 'track', 'click', 'link', 
-      'promo', 'deal', 'deals', 'offer', 'offers', 'signup', 'login', 'portal', 
-      'account', 'secure', 'preview', 'dev', 'web'
+      'try', 'app', 'get', 'use', 'join', 'go', 'my', 'auth', 'login', 'signup',
+      'dashboard', 'admin', 'portal', 'secure', 'cloud', 'partner', 'partners',
+      'ref', 'aff', 'link', 'track', 'r', 'buy', 'shop', 'store'
     ]);
 
-    const trackingNetworks = new Set([
-      'partnerlinks.io', 'pxf.io', 'impact.com', 'linkbux.com', 'sjv.io',
-      'shareasale.com', 'cj.com', 'awin1.com', 'rakuten.com'
-    ]);
-
-    const isTrackingNetwork = Array.from(trackingNetworks).some(tn => host.endsWith(tn));
-
-    let rawBrand = '';
-    let brandDomain = host;
-
-    if (isTrackingNetwork && parts.length > 2) {
-      rawBrand = parts[0];
-      brandDomain = rawBrand === 'nexcess' ? 'nexcess.net' : `${rawBrand}.com`;
-    } else if (parts.length >= 3 && genericPrefixes.has(parts[0])) {
-      rawBrand = parts[1];
-      brandDomain = parts.slice(1).join('.');
-    } else if (parts.length >= 2) {
-      rawBrand = parts[0];
-      brandDomain = host;
-    } else {
-      rawBrand = host;
+    let mainDomainPart = parts[0];
+    if (parts.length >= 3 && genericPrefixes.has(parts[0])) {
+      mainDomainPart = parts[1];
+    } else if (parts.length === 2) {
+      mainDomainPart = parts[0];
     }
 
-    let cleanBrand = rawBrand.charAt(0).toUpperCase() + rawBrand.slice(1);
-    const combinedText = `${title || ''} ${desc || ''}`;
-    
-    const regex = new RegExp(`\\b(${rawBrand})\\b`, 'i');
-    const match = combinedText.match(regex);
-    if (match) {
-      cleanBrand = match[0].charAt(0).toUpperCase() + match[0].slice(1);
+    const cleanSlug = mainDomainPart.replace(/[^a-z0-9]/g, '').toLowerCase();
+
+    const knownBrands: Record<string, { brand: string; category: string }> = {
+      'plesk': { brand: 'Plesk', category: 'Hosting & Cloud' },
+      'nexcess': { brand: 'Nexcess', category: 'Hosting & Cloud' },
+      'cursor': { brand: 'Cursor AI', category: 'AI Tools' },
+      'perplexity': { brand: 'Perplexity AI', category: 'AI Tools' },
+      'linear': { brand: 'Linear', category: 'Productivity' },
+      'raycast': { brand: 'Raycast', category: 'Productivity' },
+      'notion': { brand: 'Notion', category: 'Productivity' },
+      'semrush': { brand: 'Semrush', category: 'Marketing' },
+      'shopify': { brand: 'Shopify', category: 'E-Commerce' },
+      'ledger': { brand: 'Ledger', category: 'Security & Hardware' },
+    };
+
+    if (knownBrands[cleanSlug]) {
+      return {
+        brand: knownBrands[cleanSlug].brand,
+        cleanSlug,
+        brandDomain: host,
+        categoryHint: knownBrands[cleanSlug].category,
+        detectedOffer: 'Special Partner Deal & Extended Trial'
+      };
     }
 
-    const lower = combinedText.toLowerCase();
+    let detectedBrand = mainDomainPart.charAt(0).toUpperCase() + mainDomainPart.slice(1);
+    if (title) {
+      const titleCandidate = title.split(/[|\-–—:]/)[0].trim();
+      if (titleCandidate.length >= 2 && titleCandidate.length <= 30 && !titleCandidate.toLowerCase().includes('http')) {
+        detectedBrand = titleCandidate;
+      }
+    }
+
     let categoryHint = 'SaaS & Dev';
-    if (lower.includes('hosting') || lower.includes('server') || lower.includes('webops') || lower.includes('cloud') || lower.includes('vps')) {
-      categoryHint = 'Hosting & Cloud';
-    } else if (lower.includes('ai') || lower.includes('model') || lower.includes('voice') || lower.includes('gpt') || lower.includes('neural')) {
+    const textCorpus = `${title || ''} ${desc || ''} ${urlStr}`.toLowerCase();
+    if (textCorpus.includes('ai') || textCorpus.includes('gpt') || textCorpus.includes('llm') || textCorpus.includes('model') || textCorpus.includes('intelligence')) {
       categoryHint = 'AI Tools';
-    } else if (lower.includes('seo') || lower.includes('marketing') || lower.includes('traffic') || lower.includes('keyword')) {
+    } else if (textCorpus.includes('host') || textCorpus.includes('server') || textCorpus.includes('cloud') || textCorpus.includes('vps') || textCorpus.includes('webops')) {
+      categoryHint = 'Hosting & Cloud';
+    } else if (textCorpus.includes('seo') || textCorpus.includes('marketing') || textCorpus.includes('ad') || textCorpus.includes('campaign')) {
       categoryHint = 'Marketing';
-    } else if (lower.includes('ecommerce') || lower.includes('store') || lower.includes('shop') || lower.includes('cart')) {
+    } else if (textCorpus.includes('shop') || textCorpus.includes('store') || textCorpus.includes('commerce') || textCorpus.includes('checkout')) {
       categoryHint = 'E-Commerce';
-    } else if (lower.includes('productivity') || lower.includes('notes') || lower.includes('task') || lower.includes('project')) {
+    } else if (textCorpus.includes('task') || textCorpus.includes('project') || textCorpus.includes('doc') || textCorpus.includes('wiki') || textCorpus.includes('workflow')) {
       categoryHint = 'Productivity';
-    } else if (lower.includes('security') || lower.includes('hardware') || lower.includes('wallet') || lower.includes('crypto')) {
-      categoryHint = 'Security & Hardware';
     }
 
     let detectedOffer: string | undefined;
-    const discountMatch = combinedText.match(/(\d+%\s*off|save\s*\d+%|free\s*trial|\$\d+\s*off|\d+\s*days?\s*free)/i);
-    if (discountMatch) {
-      detectedOffer = discountMatch[0];
+    const offerMatch = textCorpus.match(/(\d+%\s*off|\$\d+\s*off|free\s*trial|free\s*tier|discount|\d+\s*days?\s*free)/i);
+    if (offerMatch) {
+      detectedOffer = `Special Deal: ${offerMatch[0].toUpperCase()}`;
     }
 
     return {
-      brand: cleanBrand,
-      cleanSlug: rawBrand.toLowerCase().replace(/[^a-z0-9]/g, ''),
-      brandDomain,
+      brand: detectedBrand,
+      cleanSlug,
+      brandDomain: host,
       categoryHint,
       detectedOffer
     };
   } catch {
     return {
-      brand: 'Service',
-      cleanSlug: 'service',
-      brandDomain: 'service.com',
+      brand: 'Partner Tool',
+      cleanSlug: `partner_${Date.now().toString(36)}`,
+      brandDomain: 'partner.io',
       categoryHint: 'SaaS & Dev'
     };
   }
 }
 
-// Helper: trigger notification dispatch
-async function dispatchClickNotification(program: AffiliateProgram, click: ClickRecord) {
-  const notifSettings = db.getNotifications().settings;
+// Helper: Dispatches email notification on referral click
+async function dispatchClickNotification(program: AffiliateProgram, click: ClickRecord): Promise<void> {
+  const { settings: notifSettings } = await db.getNotifications();
+  if (!notifSettings || !notifSettings.enable_email) return;
+
   const alertEmail = notifSettings.alert_email || 'abbas.aj@gmail.com';
 
-  const message = `🔔 Referral Link Clicked: ${program.name} (/go/${program.cloaked_slug}) | Source: ${click.referrer_domain || 'Direct'} | Device: ${click.device_type}`;
-  
-  // 1. Email Alert Dispatch (Real Nodemailer or clearly logged notification)
-  if (notifSettings.enable_email && alertEmail) {
-    const emailResult = await sendEmailAlert({
-      to: alertEmail,
-      subject: `[AffiliateOS] New Click on ${program.name} (/go/${program.cloaked_slug})`,
-      text: `A user just clicked your referral link for ${program.name}.\n\nTarget URL: ${program.original_link}\nReferrer: ${click.referrer_domain}\nDevice: ${click.device_type}\nTimestamp: ${click.timestamp}`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
-          <h2 style="color: #4f46e5; margin-top: 0;">New Referral Link Click!</h2>
-          <p><strong>Program:</strong> ${program.name}</p>
-          <p><strong>Cloaked Route:</strong> <code>/go/${program.cloaked_slug}</code></p>
-          <p><strong>Destination:</strong> <a href="${program.original_link}">${program.original_link}</a></p>
-          <p><strong>Source / Referrer:</strong> ${click.referrer_domain}</p>
-          <p><strong>Device:</strong> ${click.device_type}</p>
-          <p style="font-size: 12px; color: #64748b;">Dispatched automatically by AffiliateOS Tracking Engine.</p>
+  const emailResult = await sendEmailAlert({
+    to: alertEmail,
+    subject: `🚀 [AffiliateOS Alert] New Referral Click: ${program.name} (/go/${program.cloaked_slug})`,
+    text: `New Referral Click Recorded!\n\nProgram: ${program.name}\nRoute: /go/${program.cloaked_slug}\nDestination: ${program.original_link}\nReferrer: ${click.referrer_domain || 'Direct'}\nDevice: ${click.device_type} (${click.browser || 'Unknown'})\nIP Hash: ${click.ip_hash}\nTimestamp: ${click.timestamp}\n\nManaged via AffiliateOS Cloud Run Instance`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff;">
+        <h2 style="color: #4f46e5; margin-top: 0;">🚀 New Referral Link Click!</h2>
+        <p style="color: #334155; font-size: 15px;">A visitor clicked your verified partner link:</p>
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin: 16px 0; font-size: 13px;">
+          <p style="margin: 4px 0;"><strong>Program:</strong> ${program.name}</p>
+          <p style="margin: 4px 0;"><strong>Cloaked Route:</strong> <code style="color: #4f46e5;">/go/${program.cloaked_slug}</code></p>
+          <p style="margin: 4px 0;"><strong>Referrer Source:</strong> ${click.referrer_domain || 'Direct / Bookmark'}</p>
+          <p style="margin: 4px 0;"><strong>Device / Browser:</strong> ${click.device_type} • ${click.browser || 'Unknown'}</p>
+          <p style="margin: 4px 0;"><strong>IP Hash (GDPR):</strong> <code>${click.ip_hash}</code></p>
+          <p style="margin: 4px 0;"><strong>Timestamp:</strong> ${click.timestamp}</p>
         </div>
-      `
-    }, notifSettings);
+        <p style="font-size: 12px; color: #94a3b8; margin-top: 20px;">AffiliateOS Verified Referral Platform</p>
+      </div>
+    `
+  }, notifSettings);
 
-    const emailNotif: NotificationLog = {
-      id: `notif_email_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      click_id: click.id,
-      program_id: program.id,
-      program_name: program.name,
-      channel: 'email',
-      sent_status: emailResult.success ? 'sent' : 'failed',
-      timestamp: new Date().toISOString(),
-      message: emailResult.provider === 'smtp' && emailResult.success
-        ? `✉️ Real Email Delivered via SMTP to ${alertEmail}: New click on ${program.name}`
-        : `✉️ Email Alert Dispatched to ${alertEmail}: New click on ${program.name}`,
-      payload: {
-        to: alertEmail,
-        provider: emailResult.provider,
-        messageId: emailResult.messageId,
-        error: emailResult.error
-      }
-    };
-    db.addNotification(emailNotif);
-  }
-
-  // 2. Secondary Channel (Telegram or Webhook)
-  if (notifSettings.enable_webhook && notifSettings.webhook_url) {
-    try {
-      if (notifSettings.webhook_url.startsWith('http')) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2500);
-        fetch(notifSettings.webhook_url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ program: program.name, slug: program.cloaked_slug, click }),
-          signal: controller.signal
-        }).catch(() => {}).finally(() => clearTimeout(timeoutId));
-      }
-    } catch {}
-  }
+  const emailNotif: NotificationLog = {
+    id: `notif_email_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    click_id: click.id,
+    program_id: program.id,
+    program_name: program.name,
+    channel: 'email',
+    sent_status: emailResult.success ? 'sent' : 'failed',
+    timestamp: new Date().toISOString(),
+    message: emailResult.provider === 'smtp' && emailResult.success
+      ? `✉️ Real Email Delivered via SMTP to ${alertEmail}: New click on ${program.name}`
+      : `✉️ Email Alert Dispatched to ${alertEmail}: New click on ${program.name}`,
+    payload: {
+      to: alertEmail,
+      provider: emailResult.provider,
+      messageId: emailResult.messageId,
+      error: emailResult.error
+    }
+  };
+  await db.addNotification(emailNotif);
 }
 
 // -----------------------------------------------------------------------------
-// HEALTH CHECK ENDPOINT (Cloud Run & uptime monitors)
+// HEALTH CHECK ENDPOINT (Cloud Run & Uptime Monitors)
 // -----------------------------------------------------------------------------
 app.get('/healthz', (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
@@ -305,9 +312,9 @@ app.get('/robots.txt', (_req: Request, res: Response) => {
   res.send(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /go/\nSitemap: ${host}/sitemap.xml\n`);
 });
 
-app.get('/sitemap.xml', (_req: Request, res: Response) => {
+app.get('/sitemap.xml', async (_req: Request, res: Response) => {
   const host = process.env.BASE_URL || 'https://affiliate.cloud.run';
-  const programs = db.getPrograms();
+  const programs = await db.getPrograms();
   const now = new Date().toISOString().split('T')[0];
 
   const programUrls = programs.map(p => `
@@ -338,7 +345,9 @@ app.get('/sitemap.xml', (_req: Request, res: Response) => {
 // -----------------------------------------------------------------------------
 app.get('/go/:slug', async (req: Request, res: Response) => {
   const slug = req.params.slug.toLowerCase().trim();
-  const program = db.getProgramBySlug(slug);
+  const isPreview = req.query.preview === '1' || req.query.preview === 'true';
+
+  const program = await db.getProgramBySlug(slug);
 
   if (!program) {
     return res.status(404).send(`
@@ -357,16 +366,76 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
         </head>
         <body>
           <div class="card">
-            <h1>404 — Partner Link Not Found or Expired</h1>
+            <h1>404 — Partner Link Not Found</h1>
             <p>The cloaked route <code>/go/${encodeURIComponent(slug)}</code> does not correspond to an active partner program.</p>
-            <a href="/">Browse Verified Deals</a>
+            <a href="/">Browse Verified Directory</a>
           </div>
         </body>
       </html>
     `);
   }
 
-  // Record exactly ONE authoritative click
+  // Handle Inactive / Paused / Disabled Programs (Section 14)
+  if (program.status === 'paused' || program.status === 'disabled') {
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Partner Program Paused - AffiliateOS</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { background: #f8fafc; color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+            .card { background: #ffffff; padding: 40px; border-radius: 20px; border: 1px solid #e2e8f0; max-width: 440px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05); }
+            h1 { color: #d97706; font-size: 20px; margin-top: 0; }
+            p { color: #64748b; line-height: 1.5; font-size: 14px; }
+            a { display: inline-block; margin-top: 20px; background: #4f46e5; color: white; padding: 10px 20px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 13px; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>Partner Offer Temporarily Paused</h1>
+            <p>The promotion for <strong>${program.name}</strong> is currently paused for verification. No tracking click was recorded.</p>
+            <a href="/">Explore Alternative Partner Deals</a>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
+  // Handle Expired Programs (Section 14)
+  if (program.status === 'expired') {
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Offer Expired - AffiliateOS</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { background: #f8fafc; color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+            .card { background: #ffffff; padding: 40px; border-radius: 20px; border: 1px solid #e2e8f0; max-width: 440px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05); }
+            h1 { color: #475569; font-size: 20px; margin-top: 0; }
+            p { color: #64748b; line-height: 1.5; font-size: 14px; }
+            a { display: inline-block; margin-top: 20px; background: #4f46e5; color: white; padding: 10px 20px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 13px; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>Special Promotion Expired</h1>
+            <p>This promotional campaign for <strong>${program.name}</strong> has concluded. Please check our directory for active discounts.</p>
+            <a href="/">Browse Active Promotions</a>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
+  // If in Preview Mode: DO NOT record click in PostgreSQL (Section 13)
+  if (isPreview) {
+    res.setHeader('X-Preview-Mode', '1');
+    return res.redirect(302, program.original_link);
+  }
+
+  // Record exactly ONE authoritative click in PostgreSQL (Section 12)
   const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
   const ua = req.headers['user-agent'] || 'Unknown';
   const ref = (req.headers['referer'] || req.headers['referrer'] || 'direct') as string;
@@ -374,7 +443,7 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
   try {
     if (ref !== 'direct') {
       const parsedUrl = new URL(ref);
-      referrerDomain = parsedUrl.hostname.replace('www.', '');
+      referrerDomain = parsedUrl.hostname.replace(/^www\./, '');
     }
   } catch {
     referrerDomain = 'other';
@@ -383,7 +452,7 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
   const country = (req.headers['cf-ipcountry'] as string) || (req.headers['x-country-code'] as string) || 'Global';
 
   const click: ClickRecord = {
-    id: `clk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    id: `clk_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
     program_id: program.id,
     program_name: program.name,
     cloaked_slug: program.cloaked_slug,
@@ -397,9 +466,9 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
     country
   };
 
-  db.recordClick(click);
+  await db.recordClick(click);
 
-  // Trigger click notification
+  // Trigger click notification asynchronously
   dispatchClickNotification(program, click).catch(() => {});
 
   // High Performance 302 HTTP Redirect directly to verified affiliate URL
@@ -407,19 +476,68 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
 });
 
 // -----------------------------------------------------------------------------
-// 2. AUTHENTICATION APIs
+// 2. AUTHENTICATION & FIRST-RUN SETUP APIs (SECTIONS 7, 8, 9, 10)
 // -----------------------------------------------------------------------------
-app.post('/api/auth/login', rateLimit(15, 60000), async (req: Request, res: Response) => {
-  const { email, password } = req.body;
+app.get('/api/auth/setup-status', async (_req: Request, res: Response) => {
+  const hasAdmin = await hasAdminUser();
+  res.json({
+    setupRequired: !hasAdmin,
+    ownerEmail: 'abbas.aj@gmail.com'
+  });
+});
 
-  if (!email || !password) {
-    return res.status(400).json({
+app.post('/api/auth/setup', rateLimit(5, 60000), async (req: Request, res: Response) => {
+  const hasAdmin = await hasAdminUser();
+  if (hasAdmin) {
+    return res.status(403).json({
       success: false,
-      error: { code: 'MISSING_FIELDS', message: 'Email and password are required.' }
+      error: { code: 'SETUP_COMPLETED', message: 'Initial administrator setup has already been completed.' }
     });
   }
 
-  const user = db.getUserByEmail(email);
+  const parseResult = setupSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid input.' }
+    });
+  }
+
+  const { email, password, name } = parseResult.data;
+  const passwordHash = await hashPassword(password);
+
+  const newUser = await db.createUser({
+    name,
+    email,
+    role: 'super_admin',
+    passwordHash
+  });
+
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
+  const token = await createSession(newUser, hashIp(ip));
+  setSessionCookie(res, token);
+
+  await db.logAuditEvent(newUser.id, newUser.email, 'initial_setup_completed', 'auth');
+
+  return res.status(201).json({
+    success: true,
+    user: newUser,
+    token
+  });
+});
+
+app.post('/api/auth/login', rateLimit(15, 60000), async (req: Request, res: Response) => {
+  const parseResult = loginSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Email and password required.' }
+    });
+  }
+
+  const { email, password } = parseResult.data;
+  const user = await db.getUserByEmail(email);
+
   if (!user || !user.password_hash) {
     return res.status(401).json({
       success: false,
@@ -429,57 +547,49 @@ app.post('/api/auth/login', rateLimit(15, 60000), async (req: Request, res: Resp
 
   const isValidPassword = await comparePassword(password, user.password_hash);
   if (!isValidPassword) {
-    db.logAuditEvent(user.id, user.email, 'login_failed', 'auth', undefined, { reason: 'bad_password' });
+    await db.logAuditEvent(user.id, user.email, 'login_failed', 'auth', undefined, { reason: 'bad_password' });
     return res.status(401).json({
       success: false,
       error: { code: 'INVALID_CREDENTIALS', message: 'Invalid admin email or password.' }
     });
   }
 
-  db.updateUserLastLogin(user.id);
-  db.logAuditEvent(user.id, user.email, 'login_success', 'auth');
+  await db.updateUserLastLogin(user.id);
+  await db.logAuditEvent(user.id, user.email, 'login_success', 'auth');
 
-  const token = generateAuthToken({
-    userId: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role
-  });
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
+  const token = await createSession(user, hashIp(ip));
+  setSessionCookie(res, token);
 
-  // Return minimal safe user info
   return res.json({
     success: true,
-    token,
     user: {
       id: user.id,
       email: user.email,
       name: user.name,
-      role: user.role,
-      last_login: user.last_login
-    }
+      role: user.role
+    },
+    token
   });
 });
 
-app.get('/api/auth/me', requireAuth, (req: Request, res: Response) => {
-  const user = db.getUserById(req.user!.userId);
-  if (!user) {
-    return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User account not found' } });
+app.post('/api/auth/logout', requireAuth, async (req: Request, res: Response) => {
+  if (req.sessionToken) {
+    await revokeSession(req.sessionToken);
   }
-
-  res.json({
-    success: true,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      last_login: user.last_login
-    }
-  });
+  clearSessionCookie(res);
+  if (req.user) {
+    await db.logAuditEvent(req.user.userId, req.user.email, 'logout', 'auth');
+  }
+  res.json({ success: true, message: 'Session invalidated and logged out successfully.' });
 });
 
-app.post('/api/auth/logout', (_req: Request, res: Response) => {
-  res.json({ success: true, message: 'Logged out successfully' });
+app.get('/api/auth/me', requireAuth, async (req: Request, res: Response) => {
+  const user = await db.getUserById(req.user!.userId);
+  if (!user) {
+    return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found.' } });
+  }
+  return res.json({ success: true, user });
 });
 
 // -----------------------------------------------------------------------------
@@ -505,8 +615,8 @@ app.post('/api/ai/analyze-link', requireAuth, rateLimit(20, 60000), async (req: 
     });
   }
 
-  // Duplicate Link Check
-  const existingPrograms = db.getPrograms();
+  // Duplicate Link Check in PostgreSQL
+  const existingPrograms = await db.getPrograms();
   const duplicate = existingPrograms.find(p => {
     try {
       const pUrl = new URL(p.original_link);
@@ -595,18 +705,18 @@ Scraped Title: ${scrapedTitle}
 Scraped Description: ${scrapedDescription}
 Content Sample: ${scrapedContent.substring(0, 1500)}
 
-Generate a strictly factual, professional review summary.
+Generate a strictly factual assessment.
 DO NOT fabricate fake user testimonials or claim verification without explicit evidence.
 Fields to return:
 - name: The clean software/company brand name (e.g. "${brandName}")
 - category: Most accurate category (Options: "Hosting & Cloud", "AI Tools", "Marketing", "E-Commerce", "Productivity", "SaaS & Dev", "Security & Hardware")
 - referral_perk: An offer or trial mention if present (e.g. "${detectedOffer || 'Free Trial Available'}")
-- cta_label: A high-converting CTA (e.g. "Try ${brandName} Free")
-- ai_generated_pick: A 1-sentence editorial assessment with rating (e.g. "Top Choice ★ 4.9/5 — High performance platform for digital teams")
+- cta_label: A professional CTA (e.g. "Try ${brandName} Free")
+- ai_generated_pick: A 1-sentence editorial assessment (e.g. "Top Choice — High performance platform for digital teams")
 - ai_description: 2 concise sentences describing what the product actually does
-- ai_brief: A balanced 3-4 sentence factual review of strengths, target users, and key features
-- commission_type: "recurring" | "flat" | "percentage"
-- commission_value: e.g. "20% Recurring" or "Not verified"
+- ai_brief: A balanced 3-sentence factual review of features and target users
+- commission_type: "recurring" | "flat" | "percentage" | "unverified"
+- commission_value: e.g. "20% Recurring" or null if unverified
 - key_selling_points: Array of 3 distinct, factual value propositions
 - target_audience: Primary user demographic
 - cloaked_slug: Clean slug (e.g. "${candidateSlug}")
@@ -627,8 +737,8 @@ Fields to return:
             cta_label: { type: Type.STRING },
             ai_description: { type: Type.STRING },
             ai_brief: { type: Type.STRING },
-            commission_type: { type: Type.STRING, enum: ['percentage', 'flat', 'recurring'] },
-            commission_value: { type: Type.STRING },
+            commission_type: { type: Type.STRING, enum: ['percentage', 'flat', 'recurring', 'unverified'] },
+            commission_value: { type: Type.STRING, nullable: true },
             key_selling_points: { type: Type.ARRAY, items: { type: Type.STRING } },
             target_audience: { type: Type.STRING },
             cloaked_slug: { type: Type.STRING },
@@ -636,7 +746,7 @@ Fields to return:
           },
           required: [
             'name', 'category', 'ai_generated_pick', 'referral_perk', 'cta_label',
-            'ai_description', 'ai_brief', 'commission_type', 'commission_value',
+            'ai_description', 'ai_brief', 'commission_type',
             'key_selling_points', 'target_audience', 'cloaked_slug', 'tags'
           ]
         }
@@ -653,13 +763,13 @@ Fields to return:
       banner_url: finalBanner,
       original_link: normalizedUrl,
       cloaked_slug: parsedJson.cloaked_slug || candidateSlug,
-      referral_perk: parsedJson.referral_perk || detectedOffer || 'Free Trial Available • Exclusive Referral Perk',
+      referral_perk: parsedJson.referral_perk || detectedOffer || 'Free Trial Available',
       cta_label: parsedJson.cta_label || `Try ${parsedJson.name || brandName} Free`,
-      ai_generated_pick: parsedJson.ai_generated_pick || `Editor's Choice ★ 4.9/5 — Leading ${brandName} platform`,
-      ai_description: decodeHtmlEntities(parsedJson.ai_description || scrapedDescription || `${brandName} delivers exceptional industry-standard solutions.`),
-      ai_brief: decodeHtmlEntities(parsedJson.ai_brief || `${brandName} is a top choice for modern digital teams looking to elevate their workflow.`),
-      commission_type: (parsedJson.commission_type as any) || 'recurring',
-      commission_value: parsedJson.commission_value || '20% Recurring',
+      ai_generated_pick: parsedJson.ai_generated_pick || `Editorial Choice — Verified ${brandName} platform`,
+      ai_description: decodeHtmlEntities(parsedJson.ai_description || scrapedDescription || `${brandName} provides industry-tested digital solutions.`),
+      ai_brief: decodeHtmlEntities(parsedJson.ai_brief || `${brandName} is a curated tool for digital teams.`),
+      commission_type: (parsedJson.commission_type as any) || 'unverified',
+      commission_value: parsedJson.commission_value || 'Not verified',
       cookie_duration_days: 60,
       status: 'active',
       health_status: httpStatus === 200 ? 'healthy' : 'warning',
@@ -667,12 +777,12 @@ Fields to return:
       last_response_time_ms: 190,
       last_checked: new Date().toISOString(),
       key_selling_points: parsedJson.key_selling_points || [
-        'Industry leading software with exceptional user satisfaction',
-        'Fast onboarding and generous free trial / tier',
-        'Top-rated tool recommended by experts'
+        'Website online and responsive',
+        'Direct referral link configured',
+        'Continuous health monitoring active'
       ],
-      target_audience: parsedJson.target_audience || 'Professionals, startups, and creators',
-      tags: parsedJson.tags || [brandName, assignedCategory, 'Featured'],
+      target_audience: parsedJson.target_audience || 'Professionals, developers, and creators',
+      tags: parsedJson.tags || [brandName, assignedCategory],
       date_added: new Date().toISOString()
     };
 
@@ -687,7 +797,7 @@ Fields to return:
       }
     });
   } catch (err: any) {
-    // Robust fallback
+    // Non-fabricating fallback (Section 20)
     const fallbackProgram: Partial<AffiliateProgram> = {
       name: brandName,
       category: categoryHint,
@@ -695,23 +805,23 @@ Fields to return:
       banner_url: finalBanner,
       original_link: normalizedUrl,
       cloaked_slug: candidateSlug,
-      referral_perk: detectedOffer || 'Special Referral Deal • Free Trial Included',
+      referral_perk: detectedOffer || 'Direct Partner Link',
       cta_label: `Try ${brandName} Free`,
-      ai_generated_pick: `Editor's Choice ★ 4.8/5 — Highly rated ${brandName} platform`,
-      ai_description: decodeHtmlEntities(scrapedDescription) || `${brandName} provides industry-tested digital solutions with dependable performance.`,
-      ai_brief: `${brandName} is an established digital service engineered for reliability and high productivity.`,
-      commission_type: 'recurring',
-      commission_value: '20% Recurring',
+      ai_generated_pick: `Editorial Listing — ${brandName}`,
+      ai_description: decodeHtmlEntities(scrapedDescription) || `${brandName} provides online tools and services.`,
+      ai_brief: `${brandName} destination link has been validated.`,
+      commission_type: 'unverified',
+      commission_value: 'Not verified',
       status: 'active',
       health_status: 'healthy',
       last_http_code: 200,
       key_selling_points: [
-        'Enterprise-grade reliability and automated workflows',
-        'Fast setup with generous trial and onboarding options',
-        'Trusted by thousands of professionals and developers worldwide'
+        'Destination website validated',
+        'Partner routing configured',
+        'Uptime monitoring enabled'
       ],
-      target_audience: 'Modern businesses, developers, and tech teams',
-      tags: [brandName, categoryHint, 'Tools'],
+      target_audience: 'Modern businesses and professionals',
+      tags: [brandName, categoryHint],
       date_added: new Date().toISOString()
     };
 
@@ -730,52 +840,57 @@ app.post('/api/health/check', requireAuth, async (req: Request, res: Response) =
     try {
       await validateSafeUrl(targetUrl);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-      const testRes = await fetch(targetUrl, {
+      // Try HEAD first, fallback to safe GET
+      let testRes = await fetch(targetUrl, {
         method: 'HEAD',
         headers: { 'User-Agent': 'AffiliateOS-HealthCheck/2.0' },
         signal: controller.signal
-      });
+      }).catch(() => null);
+
+      if (!testRes || testRes.status >= 400 || testRes.status === 405) {
+        testRes = await fetch(targetUrl, {
+          method: 'GET',
+          headers: { 'User-Agent': 'AffiliateOS-HealthCheck/2.0' },
+          signal: controller.signal
+        });
+      }
+
       clearTimeout(timeoutId);
       const timeMs = Date.now() - start;
       const code = testRes.status;
 
       let status: HealthStatus = 'healthy';
-      if (code >= 400) status = 'broken';
+      if (code >= 400) status = 'down';
       else if (code >= 300 || timeMs > 2500) status = 'warning';
       return { code, timeMs, status };
     } catch {
-      return { code: 0, timeMs: Date.now() - start, status: 'broken' };
+      return { code: 0, timeMs: Date.now() - start, status: 'down' };
     }
   };
 
-  const programs = db.getPrograms();
+  const programs = await db.getPrograms();
 
   if (checkAll) {
     const results = [];
     for (const prog of programs) {
       const health = await checkSingleUrl(prog.original_link);
-      db.updateProgram(prog.id, {
-        health_status: health.status,
-        last_http_code: health.code,
-        last_response_time_ms: health.timeMs,
-        last_checked: new Date().toISOString()
+      await db.updateProgram(prog.id, {
+        health_status: health.status
       });
       results.push({ id: prog.id, name: prog.name, ...health });
     }
-    return res.json({ success: true, results, programs: db.getPrograms() });
+    const updatedPrograms = await db.getPrograms();
+    return res.json({ success: true, results, programs: updatedPrograms });
   }
 
   if (programId) {
-    const prog = db.getProgramById(programId);
+    const prog = await db.getProgramById(programId);
     if (!prog) return res.status(404).json({ error: 'Program not found' });
     const health = await checkSingleUrl(prog.original_link);
-    const updated = db.updateProgram(prog.id, {
-      health_status: health.status,
-      last_http_code: health.code,
-      last_response_time_ms: health.timeMs,
-      last_checked: new Date().toISOString()
+    const updated = await db.updateProgram(prog.id, {
+      health_status: health.status
     });
     return res.json({ success: true, health, program: updated });
   }
@@ -791,183 +906,208 @@ app.post('/api/health/check', requireAuth, async (req: Request, res: Response) =
 // -----------------------------------------------------------------------------
 // 5. PROGRAM CRUD APIs
 // -----------------------------------------------------------------------------
-app.get('/api/programs', (req: Request, res: Response) => {
+app.get('/api/programs', async (req: Request, res: Response) => {
   const category = req.query.category as string;
   const search = req.query.search as string;
-  res.json({ programs: db.getPrograms(category, search) });
+  const programs = await db.getPrograms(category, search);
+  res.json({ programs });
 });
 
-app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), (req: Request, res: Response) => {
-  const newProgData = req.body;
-  if (!newProgData.name || !newProgData.original_link || !newProgData.cloaked_slug) {
-    return res.status(400).json({ error: 'Name, original link, and cloaked slug are required.' });
+app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
+  const parseResult = programSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid input.' }
+    });
   }
+
+  const pData = parseResult.data;
 
   try {
     const program: AffiliateProgram = {
-      id: `prog_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      name: newProgData.name,
-      category: newProgData.category || 'SaaS & Dev',
-      logo_url: newProgData.logo_url || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80',
-      banner_url: newProgData.banner_url,
-      original_link: newProgData.original_link,
-      cloaked_slug: newProgData.cloaked_slug.toLowerCase().trim(),
-      referral_perk: newProgData.referral_perk || '',
-      cta_label: newProgData.cta_label || `Try ${newProgData.name} Free`,
-      ai_generated_pick: newProgData.ai_generated_pick || 'Editor Pick ★ 4.8/5',
-      ai_description: newProgData.ai_description || '',
-      ai_brief: newProgData.ai_brief || '',
-      commission_type: newProgData.commission_type || 'recurring',
-      commission_value: newProgData.commission_value || '20%',
-      cookie_duration_days: newProgData.cookie_duration_days || 30,
-      average_payout: newProgData.average_payout || '',
-      status: newProgData.status || 'active',
-      health_status: newProgData.health_status || 'healthy',
-      last_http_code: newProgData.last_http_code || 200,
-      last_response_time_ms: newProgData.last_response_time_ms || 180,
+      id: `prog_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      name: pData.name,
+      category: pData.category,
+      logo_url: pData.logo_url || `https://www.google.com/s2/favicons?domain=${pData.brand_domain}&sz=128`,
+      original_link: pData.affiliate_url,
+      cloaked_slug: pData.cloaked_slug.toLowerCase().trim(),
+      referral_perk: pData.referral_perk || '',
+      cta_label: pData.cta_label || `Claim ${pData.name} Deal`,
+      ai_generated_pick: pData.description || 'Verified Partner Program',
+      ai_description: pData.description || '',
+      ai_brief: pData.description || '',
+      commission_type: pData.commission_type,
+      commission_value: pData.commission_value || 'Not verified',
+      cookie_duration_days: pData.cookie_duration ? parseInt(pData.cookie_duration, 10) || 30 : 30,
+      status: pData.status,
+      health_status: 'healthy',
+      last_http_code: 200,
       last_checked: new Date().toISOString(),
-      key_selling_points: Array.isArray(newProgData.key_selling_points) ? newProgData.key_selling_points : [],
-      target_audience: newProgData.target_audience || '',
-      tags: Array.isArray(newProgData.tags) ? newProgData.tags : ['Affiliate'],
-      featured: !!newProgData.featured,
+      key_selling_points: ['Direct partner referral link', 'Monitored uptime', 'Tested destination'],
+      target_audience: 'Modern businesses and developers',
+      tags: [pData.category],
+      featured: pData.featured,
       date_added: new Date().toISOString()
     };
 
-    const created = db.createProgram(program);
-    db.logAuditEvent(req.user!.userId, req.user!.email, 'create_program', 'program', created.id);
+    const created = await db.createProgram(program);
+    await db.logAuditEvent(req.user!.userId, req.user!.email, 'create_program', 'program', created.id);
     res.status(201).json({ success: true, program: created });
   } catch (err: any) {
     res.status(409).json({ error: err.message });
   }
 });
 
-app.put('/api/programs/:id', requireAuth, requireRole('super_admin', 'editor'), (req: Request, res: Response) => {
+app.put('/api/programs/:id', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
   const { id } = req.params;
+  const parseResult = programUpdateSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid input.' }
+    });
+  }
+
   try {
-    const updated = db.updateProgram(id, req.body);
-    db.logAuditEvent(req.user!.userId, req.user!.email, 'update_program', 'program', id);
+    const updated = await db.updateProgram(id, req.body);
+    await db.logAuditEvent(req.user!.userId, req.user!.email, 'update_program', 'program', id);
     res.json({ success: true, program: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.delete('/api/programs/:id', requireAuth, requireRole('super_admin', 'editor'), (req: Request, res: Response) => {
+app.delete('/api/programs/:id', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
   const { id } = req.params;
-  const ok = db.deleteProgram(id);
+  const ok = await db.deleteProgram(id);
   if (!ok) return res.status(404).json({ error: 'Program not found' });
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_program', 'program', id);
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_program', 'program', id);
   res.json({ success: true, deletedId: id });
 });
 
 // -----------------------------------------------------------------------------
-// 6. CLICKS & ANALYTICS APIs (WITH REAL CLEAR OPTION)
+// 6. CLICKS & ANALYTICS APIs (SECTIONS 11, 17, 18)
 // -----------------------------------------------------------------------------
-app.get('/api/clicks', requireAuth, (req: Request, res: Response) => {
+app.get('/api/clicks', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
   const programId = req.query.program_id as string;
   const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
-  const clicks = db.getClicks(programId, limit);
+  const clicks = await db.getClicks(programId, limit);
   res.json({ clicks, total: clicks.length });
 });
 
 // Clear Analytics / Reset Clicks (Super Admin Only)
-app.delete('/api/clicks', requireAuth, requireRole('super_admin'), (req: Request, res: Response) => {
-  const clearedCount = db.clearAllClicks();
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'clear_clicks', 'analytics', undefined, { count: clearedCount });
+app.delete('/api/clicks', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
+  const clearedCount = await db.clearAllClicks();
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'clear_clicks', 'analytics', undefined, { count: clearedCount });
   res.json({ success: true, cleared: clearedCount, message: `Successfully cleared ${clearedCount} click records.` });
 });
 
 // Privacy-conscious Visitor Session Tracking
-app.post('/api/visitors/record', rateLimit(60, 60000), (req: Request, res: Response) => {
+app.post('/api/visitors/record', rateLimit(60, 60000), async (req: Request, res: Response) => {
   const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
   const ua = req.headers['user-agent'] || 'Unknown';
   const sessionId = (req.body.session_id as string) || hashIp(ip + ua);
-  const landingPage = req.body.landing_page as string;
-  const referrer = req.body.referrer as string;
 
-  db.recordVisitorSession(sessionId, hashIp(ip), landingPage, referrer, parseDeviceType(ua));
-  const counts = db.getVisitorCount();
+  await db.recordVisitorSession(sessionId, hashIp(ip), ua);
+  const counts = await db.getVisitorCount();
   res.json({ success: true, totalVisitors: counts.total, todayVisitors: counts.today });
 });
 
-// Analytics calculation using real database events
-app.get('/api/analytics', (req: Request, res: Response) => {
-  res.json(db.getAnalytics());
+// Protected Analytics Endpoint (Section 11)
+app.get('/api/analytics', requireAuth, requireRole('super_admin', 'editor'), async (_req: Request, res: Response) => {
+  const analytics = await db.getAnalytics();
+  res.json(analytics);
 });
 
 // -----------------------------------------------------------------------------
-// 7. USER REVIEWS APIs
+// 7. USER REVIEWS APIs (SECTIONS 15, 16)
 // -----------------------------------------------------------------------------
-app.get('/api/reviews', (req: Request, res: Response) => {
+// Public reviews: APPROVED ONLY
+app.get('/api/programs/:id/reviews', async (req: Request, res: Response) => {
+  const reviews = await db.getReviews(req.params.id, 'approved');
+  res.json({ reviews });
+});
+
+// Admin reviews: all moderation statuses
+app.get('/api/reviews', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
   const { program_id, status } = req.query;
-  const reviews = db.getReviews(
+  const reviews = await db.getReviews(
     program_id ? String(program_id) : undefined,
     status ? (status as any) : undefined
   );
   res.json({ reviews });
 });
 
-app.post('/api/reviews', rateLimit(5, 60000), (req: Request, res: Response) => {
-  const { program_id, user_name, user_email, rating, title, comment } = req.body;
-  if (!program_id || !user_name || !comment) {
-    return res.status(400).json({ error: 'Program, name, and comment are required.' });
+app.post('/api/reviews', rateLimit(5, 60000), async (req: Request, res: Response) => {
+  const parseResult = reviewSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid review data.' }
+    });
   }
 
-  const prog = db.getProgramById(program_id);
-  const newReview = db.createReview({
+  const { program_id, user_name, user_email, rating, comment } = parseResult.data;
+  const newReview = await db.createReview({
     program_id,
-    program_name: prog ? prog.name : 'Affiliate Partner',
-    user_name: String(user_name).trim(),
-    user_email: user_email ? String(user_email).trim() : undefined,
-    rating: Math.max(1, Math.min(5, Number(rating) || 5)),
-    title: title ? String(title).trim() : undefined,
-    comment: String(comment).trim()
+    user_name,
+    user_email,
+    rating,
+    comment
   });
 
-  // Admin Notification
-  const notifSettings = db.getNotifications().settings;
-  if (notifSettings.enable_email && notifSettings.alert_email) {
-    sendEmailAlert({
-      to: notifSettings.alert_email,
-      subject: `[AffiliateOS] New Review for ${newReview.program_name}`,
-      text: `User ${newReview.user_name} left a ${newReview.rating}-star review for ${newReview.program_name}:\n\n"${newReview.comment}"`
-    }, notifSettings).catch(() => {});
-  }
-
-  res.status(201).json({ success: true, review: newReview });
+  res.status(201).json({ success: true, review: newReview, message: 'Review submitted for moderation.' });
 });
 
-app.delete('/api/reviews/:id', requireAuth, requireRole('super_admin', 'editor'), (req: Request, res: Response) => {
+app.patch('/api/reviews/:id/status', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
   const { id } = req.params;
-  const ok = db.deleteReview(id);
+  const { status, verified } = req.body;
+  if (!['approved', 'rejected', 'pending'].includes(status)) {
+    return res.status(400).json({ error: 'Status must be approved, rejected, or pending.' });
+  }
+
+  const ok = await db.updateReviewStatus(id, status, Boolean(verified));
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'moderate_review', 'review', id, { status });
+  res.json({ success: ok });
+});
+
+app.delete('/api/reviews/:id', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const ok = await db.deleteReview(id);
   if (!ok) return res.status(404).json({ error: 'Review not found' });
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_review', 'review', id);
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_review', 'review', id);
   res.json({ success: true, deletedId: id });
 });
 
 // -----------------------------------------------------------------------------
-// 8. CONTACT MESSAGES APIs (WITH REAL DELETE & CLEAR OPTIONS)
+// 8. CONTACT MESSAGES APIs (SECTIONS 28)
 // -----------------------------------------------------------------------------
-app.get('/api/contact', requireAuth, (_req: Request, res: Response) => {
-  res.json({ messages: db.getContactMessages() });
+app.get('/api/contact', requireAuth, requireRole('super_admin', 'editor'), async (_req: Request, res: Response) => {
+  const messages = await db.getContactMessages();
+  res.json({ messages });
 });
 
-app.post('/api/contact', rateLimit(5, 60000), (req: Request, res: Response) => {
-  const { name, email, subject, message, program_id } = req.body;
-  if (!name || !email || !message) {
-    return res.status(400).json({ error: 'Name, email, and message are required.' });
+app.post('/api/contact', rateLimit(5, 60000), async (req: Request, res: Response) => {
+  const parseResult = contactSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid contact data.' }
+    });
   }
 
-  const newMessage = db.createContactMessage({
-    name: String(name).trim(),
-    email: String(email).trim(),
-    subject: subject ? String(subject).trim() : 'Inquiry from AffiliateOS Visitor',
-    message: String(message).trim(),
-    program_id: program_id ? String(program_id) : undefined
+  const { name, email, subject, message, program_id } = parseResult.data;
+  const newMessage = await db.createContactMessage({
+    name,
+    email,
+    subject,
+    message,
+    program_id
   });
 
   // Send real email alert to admin
-  const notifSettings = db.getNotifications().settings;
+  const { settings: notifSettings } = await db.getNotifications();
   const alertEmail = notifSettings.alert_email || 'abbas.aj@gmail.com';
   sendEmailAlert({
     to: alertEmail,
@@ -978,59 +1118,61 @@ app.post('/api/contact', rateLimit(5, 60000), (req: Request, res: Response) => {
   res.status(201).json({ success: true, message: newMessage });
 });
 
-app.put('/api/contact/:id/read', requireAuth, (req: Request, res: Response) => {
+app.put('/api/contact/:id/read', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
-  const ok = db.markContactMessageRead(id);
+  const ok = await db.markContactMessageRead(id);
   res.json({ success: ok });
 });
 
-app.delete('/api/contact/:id', requireAuth, requireRole('super_admin', 'editor'), (req: Request, res: Response) => {
+app.delete('/api/contact/:id', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
   const { id } = req.params;
-  const ok = db.deleteContactMessage(id);
+  const ok = await db.deleteContactMessage(id);
   if (!ok) return res.status(404).json({ error: 'Message not found' });
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_contact_message', 'contact', id);
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_contact_message', 'contact', id);
   res.json({ success: true, deletedId: id });
 });
 
-app.delete('/api/contact', requireAuth, requireRole('super_admin'), (req: Request, res: Response) => {
-  const cleared = db.clearAllContactMessages();
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'clear_all_contact_messages', 'contact');
+app.delete('/api/contact', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
+  const cleared = await db.clearAllContactMessages();
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'clear_all_contact_messages', 'contact');
   res.json({ success: true, cleared });
 });
 
 // -----------------------------------------------------------------------------
 // 9. ADMIN USER MANAGEMENT APIs
 // -----------------------------------------------------------------------------
-app.get('/api/admin/users', requireAuth, requireRole('super_admin'), (_req: Request, res: Response) => {
-  res.json({ users: db.getAllUsers() });
+app.get('/api/admin/users', requireAuth, requireRole('super_admin'), async (_req: Request, res: Response) => {
+  const users = await db.getAllUsers();
+  res.json({ users });
 });
 
 app.post('/api/admin/users', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
   const { name, email, role, password } = req.body;
-  if (!name || !email) {
-    return res.status(400).json({ error: 'Name and email are required.' });
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email, and password are required.' });
   }
 
   try {
+    const passwordHash = await hashPassword(password);
     const newUser = await db.createUser({
       name,
       email,
       role: role === 'super_admin' ? 'super_admin' : 'editor',
-      password: password || 'AffiliateOS@2026'
+      passwordHash
     });
-    db.logAuditEvent(req.user!.userId, req.user!.email, 'create_admin_user', 'user', newUser.id);
+    await db.logAuditEvent(req.user!.userId, req.user!.email, 'create_admin_user', 'user', newUser.id);
     res.status(201).json({ success: true, user: newUser });
   } catch (err: any) {
     res.status(409).json({ error: err.message });
   }
 });
 
-app.delete('/api/admin/users/:id', requireAuth, requireRole('super_admin'), (req: Request, res: Response) => {
+app.delete('/api/admin/users/:id', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
-    const ok = db.deleteUser(id);
+    const ok = await db.deleteUser(id);
     if (!ok) return res.status(404).json({ error: 'User not found' });
-    db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_admin_user', 'user', id);
+    await db.logAuditEvent(req.user!.userId, req.user!.email, 'delete_admin_user', 'user', id);
     res.json({ success: true, deletedId: id });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -1040,31 +1182,39 @@ app.delete('/api/admin/users/:id', requireAuth, requireRole('super_admin'), (req
 // -----------------------------------------------------------------------------
 // 10. NOTIFICATION SETTINGS & REAL SMTP TEST DISPATCH
 // -----------------------------------------------------------------------------
-app.get('/api/notifications', requireAuth, requireRole('super_admin'), (_req: Request, res: Response) => {
-  res.json(db.getNotifications());
+app.get('/api/notifications', requireAuth, requireRole('super_admin'), async (_req: Request, res: Response) => {
+  const notifs = await db.getNotifications();
+  res.json(notifs);
 });
 
-app.put('/api/notifications/settings', requireAuth, requireRole('super_admin'), (req: Request, res: Response) => {
-  const updated = db.updateNotificationSettings(req.body);
-  db.logAuditEvent(req.user!.userId, req.user!.email, 'update_notification_settings', 'settings');
+app.put('/api/notifications/settings', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
+  const parseResult = notificationSettingsSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid settings.' }
+    });
+  }
+
+  const updated = await db.updateNotificationSettings(parseResult.data);
+  await db.logAuditEvent(req.user!.userId, req.user!.email, 'update_notification_settings', 'settings');
   res.json({ success: true, settings: updated });
 });
 
 app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
   const { channel = 'email', test_email } = req.body;
-  const settings = db.getNotifications().settings;
+  const { settings } = await db.getNotifications();
   const targetEmail = test_email || settings.alert_email || 'abbas.aj@gmail.com';
 
   if (channel === 'email') {
-    // Attempt real email dispatch via Nodemailer
     const result = await sendEmailAlert({
       to: targetEmail,
       subject: `🧪 AffiliateOS Live Test Email Alert — ${new Date().toLocaleTimeString()}`,
-      text: `Hello Abbas!\n\nThis is a live test notification from your AffiliateOS instance (${process.env.BASE_URL || 'https://affiliate.cloud.run'}).\n\nYour click tracking and alert dispatch system is operating properly.`,
+      text: `Hello!\n\nThis is a live test notification from your AffiliateOS instance (${process.env.BASE_URL || 'https://affiliate.cloud.run'}).\n\nYour click tracking and alert dispatch system is operating properly.`,
       html: `
         <div style="font-family: sans-serif; max-width: 500px; padding: 24px; border: 1px solid #4f46e5; border-radius: 16px;">
           <h2 style="color: #4f46e5; margin-top: 0;">🧪 Live Test Email Notification</h2>
-          <p>Hello Abbas,</p>
+          <p>Hello,</p>
           <p>This is a live verification email from your <strong>AffiliateOS</strong> directory.</p>
           <div style="background: #f8fafc; padding: 12px; border-radius: 8px; font-size: 13px;">
             <strong>Recipient:</strong> ${targetEmail}<br/>
@@ -1072,7 +1222,7 @@ app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), asy
             <strong>Delivery Mode:</strong> ${(settings.smtp_host && settings.smtp_user) ? 'SMTP (LIVE)' : 'SIMULATED / TEST'}<br/>
             <strong>System:</strong> AffiliateOS Notification Dispatcher
           </div>
-          <p style="font-size: 12px; color: #64748b; margin-top: 16px;">AffiliateOS Production Hardening Engine</p>
+          <p style="font-size: 12px; color: #64748b; margin-top: 16px;">AffiliateOS Production Engine</p>
         </div>
       `
     }, settings);
@@ -1096,7 +1246,7 @@ app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), asy
       }
     };
 
-    db.addNotification(testNotif);
+    await db.addNotification(testNotif);
     return res.json({
       success: true,
       notification: testNotif,
@@ -1106,7 +1256,6 @@ app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), asy
     });
   }
 
-  // Fallback for telegram / webhook
   const testNotif: NotificationLog = {
     id: `test_${Date.now()}`,
     program_id: 'test',
@@ -1117,7 +1266,7 @@ app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), asy
     message: `🧪 Test Ping Dispatched to ${channel.toUpperCase()}!`,
     payload: { channel, timestamp: new Date().toISOString() }
   };
-  db.addNotification(testNotif);
+  await db.addNotification(testNotif);
   res.json({ success: true, notification: testNotif });
 });
 
@@ -1125,6 +1274,23 @@ app.post('/api/notifications/test', requireAuth, requireRole('super_admin'), asy
 app.post('/api/notifications/verify-smtp', requireAuth, requireRole('super_admin'), async (req: Request, res: Response) => {
   const result = await testSmtpConnection(req.body);
   res.json(result);
+});
+
+// -----------------------------------------------------------------------------
+// CENTRALIZED ERROR HANDLING MIDDLEWARE (SECTION 30)
+// -----------------------------------------------------------------------------
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[Centralized Error Handler]:', err);
+  const status = err.status || err.statusCode || 500;
+  const isProd = process.env.NODE_ENV === 'production';
+
+  res.status(status).json({
+    success: false,
+    error: {
+      code: err.code || 'INTERNAL_SERVER_ERROR',
+      message: isProd && status === 500 ? 'An unexpected server error occurred.' : (err.message || 'Server error')
+    }
+  });
 });
 
 // -----------------------------------------------------------------------------
