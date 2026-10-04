@@ -46,8 +46,10 @@ import type {
 dotenv.config();
 
 const app = express();
-// Environment constraint: Dev server must run on port 3000
-const PORT = 3000;
+// Dev server runs on port 3000; production uses process.env.PORT (e.g. Cloud Run 8080)
+const PORT = process.env.NODE_ENV === 'production' && process.env.PORT
+  ? parseInt(process.env.PORT, 10)
+  : 3000;
 
 // Respect Cloud Run and reverse proxy configuration safely
 app.set('trust proxy', 1);
