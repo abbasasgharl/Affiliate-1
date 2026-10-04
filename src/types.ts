@@ -1,8 +1,8 @@
-export type CommissionType = 'percentage' | 'flat' | 'recurring';
+export type CommissionType = 'percentage' | 'flat' | 'recurring' | 'unverified';
 
-export type ProgramStatus = 'active' | 'needs_review' | 'paused' | 'expired' | 'draft' | 'manual_needed';
+export type ProgramStatus = 'active' | 'needs_review' | 'paused' | 'expired' | 'draft' | 'manual_needed' | 'disabled';
 
-export type HealthStatus = 'healthy' | 'warning' | 'broken' | 'untested';
+export type HealthStatus = 'healthy' | 'warning' | 'broken' | 'down' | 'untested';
 
 export interface AffiliateProgram {
   id: string;
@@ -102,14 +102,14 @@ export interface NotificationSettings {
   smtp_pass?: string;
   smtp_secure?: boolean;
   from_email?: string;
-  enable_telegram: boolean;
-  telegram_bot_token: string;
-  telegram_chat_id: string;
-  enable_webhook: boolean;
-  webhook_url: string;
+  enable_telegram?: boolean;
+  telegram_bot_token?: string;
+  telegram_chat_id?: string;
+  enable_webhook?: boolean;
+  webhook_url?: string;
   rate_limit_mode: RateLimitMode;
-  min_clicks_threshold: number;
-  alert_on_broken_link: boolean;
+  min_clicks_threshold?: number;
+  alert_on_broken_link?: boolean;
 }
 
 export interface AuditLog {
@@ -146,7 +146,7 @@ export interface BulkImportItem {
 export interface UserReview {
   id: string;
   program_id: string;
-  program_name: string;
+  program_name?: string;
   user_name: string;
   user_email?: string;
   rating: number; // 1 to 5
@@ -154,7 +154,7 @@ export interface UserReview {
   comment: string;
   timestamp: string;
   verified: boolean;
-  status: 'approved' | 'pending';
+  status: 'approved' | 'pending' | 'rejected';
 }
 
 export interface ContactMessage {

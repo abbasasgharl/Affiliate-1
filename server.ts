@@ -46,7 +46,8 @@ import type {
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// Environment constraint: Dev server must run on port 3000
+const PORT = 3000;
 
 // Respect Cloud Run and reverse proxy configuration safely
 app.set('trust proxy', 1);
@@ -376,7 +377,7 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
   }
 
   // Handle Inactive / Paused / Disabled Programs (Section 14)
-  if (program.status === 'paused' || program.status === 'disabled') {
+  if (program.status === 'paused' || (program.status as string) === 'disabled') {
     return res.status(200).send(`
       <!DOCTYPE html>
       <html>
@@ -937,10 +938,10 @@ app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), asy
       ai_generated_pick: pData.description || 'Verified Partner Program',
       ai_description: pData.description || '',
       ai_brief: pData.description || '',
-      commission_type: pData.commission_type,
+      commission_type: pData.commission_type as any,
       commission_value: pData.commission_value || 'Not verified',
       cookie_duration_days: pData.cookie_duration ? parseInt(pData.cookie_duration, 10) || 30 : 30,
-      status: pData.status,
+      status: pData.status as any,
       health_status: 'healthy',
       last_http_code: 200,
       last_checked: new Date().toISOString(),
@@ -1301,7 +1302,7 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

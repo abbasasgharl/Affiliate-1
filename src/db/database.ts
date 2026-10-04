@@ -24,7 +24,8 @@ import {
   AuditLog,
   VisitorSession,
   AnalyticsSummary,
-  DeviceType
+  DeviceType,
+  HealthStatus
 } from '../types.ts';
 import {
   INITIAL_PROGRAMS,
@@ -446,6 +447,7 @@ export const postgresDb = {
       timestamp: c.timestamp.toISOString(),
       ip_hash: c.ipHash,
       user_agent: c.userAgent || 'Unknown',
+      referrer_url: c.destinationUrl || c.referrerDomain || 'direct',
       referrer_domain: c.referrerDomain || 'direct',
       device_type: (c.deviceType as any) || 'unknown',
       browser: c.browser || 'Unknown',
@@ -760,8 +762,9 @@ export const postgresDb = {
     };
 
     const historyRows = await db.select().from(notifications).orderBy(desc(notifications.createdAt)).limit(50);
-    const history = historyRows.map(n => ({
+    const history: NotificationLog[] = historyRows.map(n => ({
       id: n.id,
+      program_id: n.type,
       program_name: n.type,
       channel: n.channel as any,
       sent_status: n.status as any,
