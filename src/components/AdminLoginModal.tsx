@@ -200,7 +200,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
         <div className="mt-5 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-center">
           <p className="text-[11px] text-slate-500 font-medium">
-            Registered Owner Account: <span className="font-mono text-slate-700 font-bold"></span>
+            Registered Owner Account: <span className="font-mono text-slate-700 font-bold">abbas.aj@gmail.com</span>
           </p>
           <p className="text-[10px] text-slate-400 mt-0.5">
             PostgreSQL authenticated session with server-side revocation
