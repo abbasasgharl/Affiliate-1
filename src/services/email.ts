@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer';
-import { NotificationSettings } from '../types.ts';
+import type { NotificationSettings } from '../types.ts';
 
 export interface EmailSendOptions {
   to: string;

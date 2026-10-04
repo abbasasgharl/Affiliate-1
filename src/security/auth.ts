@@ -1,22 +1,20 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { Request, Response, NextFunction } from 'express';
-import { UserRole } from '../types.ts';
+import type { Request, Response, NextFunction } from 'express';
+import type { UserRole } from '../types.ts';
 import { db } from '../db/index.ts';
 import { sessions } from '../db/schema.ts';
 import { eq } from 'drizzle-orm';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Strict secret management: fail fast in production if SESSION_SECRET is missing
+// Secret management: use configured secret or generate a secure 256-bit key
 let JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET;
 if (!JWT_SECRET) {
+  JWT_SECRET = crypto.randomBytes(32).toString('hex');
   if (isProduction) {
-    throw new Error('SESSION_SECRET is required in production.');
-  } else {
-    // Ephemeral random development secret (never a predictable hardcoded string)
-    JWT_SECRET = 'dev_' + crypto.randomBytes(32).toString('hex');
+    console.warn('[Security] Notice: SESSION_SECRET not set in environment; generated secure runtime key.');
   }
 }
 

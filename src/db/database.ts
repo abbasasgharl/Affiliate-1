@@ -13,7 +13,7 @@ import {
   healthChecks
 } from './schema.ts';
 import { eq, desc, and, or, sql, like, ilike } from 'drizzle-orm';
-import {
+import type {
   AffiliateProgram,
   ClickRecord,
   AdminUser,
