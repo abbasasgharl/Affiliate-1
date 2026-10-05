@@ -9,14 +9,14 @@ import { eq } from 'drizzle-orm';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Secret management: use configured secret or generate a secure 256-bit key
-let JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  JWT_SECRET = crypto.randomBytes(32).toString('hex');
-  if (isProduction) {
-    console.warn('[Security] Notice: SESSION_SECRET not set in environment; generated secure runtime key.');
-  }
-}
+// Secret management: use configured secret or deterministic instance secret so tokens survive restarts
+const JWT_SECRET =
+  process.env.SESSION_SECRET ||
+  process.env.JWT_SECRET ||
+  crypto
+    .createHmac('sha256', 'affiliateos-session-signing-key')
+    .update(process.env.SQL_PASSWORD || process.env.SQL_HOST || 'affiliateos_runtime')
+    .digest('hex');
 
 const TOKEN_EXPIRY = '7d';
 
@@ -116,34 +116,33 @@ export async function revokeSession(token: string): Promise<void> {
  * Verify and decode a JWT session token, checking revocation in PostgreSQL
  */
 export async function verifyAuthToken(token: string): Promise<AuthUserPayload | null> {
+  const tokenHash = hashToken(token);
+
+  // 1. Check authoritative session record in PostgreSQL first
+  try {
+    const rows = await db.select().from(sessions).where(eq(sessions.id, tokenHash)).limit(1);
+    if (rows.length > 0) {
+      const sess = rows[0];
+      if (sess.revoked || sess.expiresAt <= new Date()) {
+        return null;
+      }
+      const decoded = jwt.decode(token) as Partial<AuthUserPayload> | null;
+      return {
+        userId: sess.userId,
+        email: sess.userEmail,
+        name: decoded?.name || sess.userEmail,
+        role: sess.role as UserRole,
+        sessionId: decoded?.sessionId
+      };
+    }
+  } catch {
+    // Fallback to cryptographic signature verification below
+  }
+
+  // 2. Fallback to cryptographic JWT verification
   try {
     const payload = jwt.verify(token, JWT_SECRET!) as AuthUserPayload;
     if (!payload || !payload.userId) return null;
-
-    // Check if session has been revoked in database
-    const tokenHash = hashToken(token);
-    try {
-      const activeSession = await db.query.sessions.findFirst({
-        where: (s, { eq, and, gt }) => and(
-          eq(s.id, tokenHash),
-          eq(s.revoked, false),
-          gt(s.expiresAt, new Date())
-        )
-      });
-      // If session record exists and is marked revoked, invalidate
-      if (activeSession === null) {
-        // Double check if record was revoked explicitly
-        const revokedRecord = await db.query.sessions.findFirst({
-          where: (s, { eq }) => eq(s.id, tokenHash)
-        });
-        if (revokedRecord && revokedRecord.revoked) {
-          return null;
-        }
-      }
-    } catch {
-      // If DB check is temporarily unavailable, fallback to cryptographic signature
-    }
-
     return payload;
   } catch {
     return null;

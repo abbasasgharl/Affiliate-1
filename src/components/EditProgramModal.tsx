@@ -29,30 +29,37 @@ export const EditProgramModal: React.FC<EditProgramModalProps> = ({
   const [formData, setFormData] = useState<AffiliateProgram>({ ...program });
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    setErrorMsg(null);
     try {
       const updated = await api.updateProgram(program.id, formData);
       onProgramUpdated(updated);
       onClose();
     } catch (err: any) {
-      alert(err.message || 'Failed to update program');
+      setErrorMsg(err.message || 'Failed to update program');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!confirm(`Are you sure you want to delete ${program.name}?`)) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
     setDeleting(true);
+    setErrorMsg(null);
     try {
       await api.deleteProgram(program.id);
       onProgramDeleted(program.id);
       onClose();
     } catch (err: any) {
-      alert(err.message || 'Failed to delete program');
+      setErrorMsg(err.message || 'Failed to delete program');
     } finally {
       setDeleting(false);
     }

@@ -61,7 +61,7 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
         if (sortBy === 'recommended') {
           if (a.featured && !b.featured) return -1;
           if (!a.featured && b.featured) return 1;
-          return a.name.localeCompare(b.name);
+          return new Date(b.date_added).getTime() - new Date(a.date_added).getTime();
         }
         return new Date(b.date_added).getTime() - new Date(a.date_added).getTime();
       });
@@ -195,7 +195,7 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
               onChange={(e) => setSortBy(e.target.value as any)}
               className="bg-white border border-slate-200 text-slate-700 text-xs font-bold rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-600 shadow-2xs cursor-pointer"
             >
-              <option value="rating">Top Recommended</option>
+              <option value="recommended">Top Recommended</option>
               <option value="newest">Recently Added</option>
             </select>
           </div>
@@ -246,7 +246,10 @@ export const PublicDirectory: React.FC<PublicDirectoryProps> = ({
                       alt={program.name}
                       className="w-11 h-11 rounded-xl object-contain p-1 border border-slate-200 bg-white shadow-xs"
                       onError={(e) => {
-                        (e.target as HTMLImageElement).src = `https://www.google.com/s2/favicons?domain=${program.cloaked_slug}.com&sz=128`;
+                        const img = e.target as HTMLImageElement;
+                        const letter = encodeURIComponent((program.name || 'P').charAt(0).toUpperCase());
+                        img.onerror = null;
+                        img.src = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%234f46e5"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="white" font-family="sans-serif" font-weight="bold" font-size="30">${letter}</text></svg>`;
                       }}
                     />
                     <div className="flex-1 min-w-0">

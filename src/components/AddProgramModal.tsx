@@ -32,17 +32,18 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
   const [inputUrl, setInputUrl] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [hasPulledData, setHasPulledData] = useState(false);
+  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
 
-  // Form State
-  const [formData, setFormData] = useState<Partial<AffiliateProgram>>({
+  const initialFormState: Partial<AffiliateProgram> = {
     name: '',
     category: 'AI Tools',
     original_link: '',
     cloaked_slug: '',
     logo_url: '',
-    banner_url: '',
+    banner_url: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80',
     referral_perk: 'Special Referral Deal • Free Trial Included',
     cta_label: 'Try It Free',
     ai_generated_pick: '',
@@ -51,26 +52,76 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
     commission_type: 'recurring',
     commission_value: '25% Recurring',
     cookie_duration_days: 60,
-    status: 'active', // default directly to active so it appears immediately!
+    featured: true,
+    status: 'active',
     key_selling_points: ['Top-rated software in its category', 'Generous trial and fast onboarding', 'Recommended by industry professionals'],
     target_audience: 'Modern teams, creators, and professionals',
     tags: ['Recommended', 'Tool']
-  });
+  };
+
+  // Form State
+  const [formData, setFormData] = useState<Partial<AffiliateProgram>>(initialFormState);
 
   const [saving, setSaving] = useState(false);
 
   if (!isOpen) return null;
 
-  // Real-time duplicate check
+  // Real-time duplicate check & automatic field population from URL
   const handleUrlChange = (url: string) => {
     setInputUrl(url);
     setDuplicateWarning(null);
-    if (!url || url.length < 5) return;
+    setSubmitError(null);
+
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setFormData(prev => ({ ...prev, original_link: '' }));
+      return;
+    }
+
+    let normalized = trimmed;
+    if (!/^https?:\/\//i.test(normalized) && normalized.includes('.')) {
+      normalized = 'https://' + normalized;
+    }
+
+    setFormData(prev => {
+      const next = { ...prev, original_link: normalized };
+      try {
+        const parsed = new URL(normalized);
+        const rawHost = parsed.hostname.replace(/^www\./, '').toLowerCase();
+        const hostParts = rawHost.split('.');
+        const genericSubdomains = new Set([
+          'try', 'app', 'get', 'use', 'join', 'go', 'my', 'auth', 'login', 'signup',
+          'dashboard', 'admin', 'portal', 'secure', 'cloud', 'partner', 'partners',
+          'ref', 'aff', 'link', 'track', 'r', 'buy', 'shop', 'store', 'links', 'promo'
+        ]);
+        const rootDomain = hostParts.length >= 3 && genericSubdomains.has(hostParts[0])
+          ? hostParts.slice(1).join('.')
+          : rawHost;
+        const domainParts = rootDomain.split('.');
+        const rawBrand = domainParts.length >= 2 ? domainParts[0] : rootDomain;
+        const cleanSlug = rawBrand.replace(/[^a-z0-9_-]/g, '');
+        const brandTitle = rawBrand.charAt(0).toUpperCase() + rawBrand.slice(1);
+
+        if (!slugManuallyEdited && cleanSlug) {
+          next.name = brandTitle;
+          next.cta_label = `Try ${brandTitle} Free`;
+          next.cloaked_slug = cleanSlug;
+          next.ai_generated_pick = `Editor's Pick — Verified ${brandTitle} Partner Deal`;
+          next.ai_description = `Access ${brandTitle} through our curated partner referral link to claim available trial and promotional perks.`;
+        }
+        if (rootDomain.includes('.') && rootDomain.split('.').pop()!.length >= 2) {
+          next.logo_url = `https://www.google.com/s2/favicons?domain=${rootDomain}&sz=128`;
+        }
+      } catch {
+        // Ignore partial URLs while typing
+      }
+      return next;
+    });
+
+    if (trimmed.length < 5) return;
 
     try {
-      let testUrl = url.trim();
-      if (!/^https?:\/\//i.test(testUrl)) testUrl = 'https://' + testUrl;
-      const parsed = new URL(testUrl);
+      const parsed = new URL(normalized);
       const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
 
       const dup = existingPrograms.find(p => {
@@ -82,18 +133,23 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
       });
 
       if (dup) {
-        setDuplicateWarning(`Note: You already have a referral link for "${dup.name}" (/go/${dup.cloaked_slug}).`);
+        setDuplicateWarning(`Note: You already have a referral link for "${dup.name}" (/go/${dup.cloaked_slug}). Publishing will create a new unique link automatically.`);
       }
     } catch {}
   };
 
   const handleRunAiAnalysis = async () => {
-    if (!inputUrl) return;
+    const rawUrl = inputUrl || formData.original_link || '';
+    if (!rawUrl.trim()) {
+      setAiError('Please paste a referral or website link first.');
+      return;
+    }
     setAnalyzing(true);
     setAiError(null);
+    setSubmitError(null);
 
     try {
-      let targetUrl = inputUrl.trim();
+      let targetUrl = rawUrl.trim();
       if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
 
       const result = await api.analyzeLinkWithAI(targetUrl);
@@ -101,7 +157,8 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
         setFormData(prev => ({
           ...prev,
           ...result.program,
-          original_link: targetUrl
+          original_link: targetUrl,
+          featured: true
         }));
         setHasPulledData(true);
       }
@@ -114,8 +171,32 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name || !formData.original_link || !formData.cloaked_slug) {
-      alert('Please fill out Name, Referral Link, and Cloaked Slug.');
+    setSubmitError(null);
+
+    let finalLink = (formData.original_link || inputUrl || '').trim();
+    if (finalLink && !/^https?:\/\//i.test(finalLink)) {
+      finalLink = 'https://' + finalLink;
+    }
+
+    let finalName = (formData.name || '').trim();
+    if (!finalName && finalLink) {
+      try {
+        const host = new URL(finalLink).hostname.replace(/^www\./, '');
+        const brand = host.split('.')[0] || 'Partner';
+        finalName = brand.charAt(0).toUpperCase() + brand.slice(1);
+      } catch {}
+    }
+
+    let finalSlug = (formData.cloaked_slug || '')
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9_-]/g, '');
+    if (!finalSlug && finalName) {
+      finalSlug = finalName.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    }
+
+    if (!finalName || !finalLink || !finalSlug) {
+      setSubmitError('Please provide a Referral Link and Service Name before publishing.');
       return;
     }
 
@@ -123,12 +204,24 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
     try {
       const created = await api.createProgram({
         ...formData,
+        name: finalName,
+        original_link: finalLink,
+        cloaked_slug: finalSlug,
+        featured: formData.featured !== undefined ? formData.featured : true,
         status: 'active' // promote immediately
       });
+      // Reset modal state for next time
+      setInputUrl('');
+      setFormData(initialFormState);
+      setHasPulledData(false);
+      setSlugManuallyEdited(false);
+      setDuplicateWarning(null);
+      setAiError(null);
+      setSubmitError(null);
       onProgramAdded(created);
       onClose();
     } catch (err: any) {
-      alert(err.message || 'Failed to save program');
+      setSubmitError(err.message || 'Failed to save referral program. Please verify you are signed in as Admin.');
     } finally {
       setSaving(false);
     }
@@ -166,7 +259,7 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
             <div className="relative flex-1 w-full">
               <Globe className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
-                type="url"
+                type="text"
                 value={inputUrl}
                 onChange={(e) => handleUrlChange(e.target.value)}
                 onKeyDown={(e) => {
@@ -213,26 +306,43 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
           )}
         </div>
 
-        {/* Live Visual Preview Card (Appears as soon as auto-pull finishes) */}
-        {hasPulledData && (
+        {/* Live Visual Preview Card (Appears as soon as URL is entered or auto-pull finishes) */}
+        {(hasPulledData || Boolean(formData.name && formData.logo_url)) && (
           <div className="mt-6 p-4 rounded-2xl bg-slate-50 border border-slate-200">
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs font-extrabold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
                 <CheckCircle className="w-4 h-4 text-emerald-600" />
                 Live Card Preview (How Users Will See It)
               </span>
-              <span className="text-[11px] font-bold text-indigo-600">Auto-Generated by AI</span>
+              <span className="text-[11px] font-bold text-indigo-600">
+                {hasPulledData ? 'Auto-Generated by AI' : 'Instant Brand Preview'}
+              </span>
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm max-w-md mx-auto">
               {formData.banner_url && (
                 <div className="h-32 w-full rounded-xl overflow-hidden mb-3 bg-slate-100">
-                  <img src={formData.banner_url} alt="Banner Preview" className="w-full h-full object-cover" />
+                  <img
+                    src={formData.banner_url}
+                    alt="Banner Preview"
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80';
+                    }}
+                  />
                 </div>
               )}
               <div className="flex items-center gap-2.5 mb-2">
                 {formData.logo_url && (
-                  <img src={formData.logo_url} alt="Logo" className="w-8 h-8 rounded-lg object-contain p-0.5 border border-slate-200" />
+                  <img
+                    src={formData.logo_url}
+                    alt="Logo"
+                    className="w-8 h-8 rounded-lg object-contain p-0.5 border border-slate-200 bg-white"
+                    onError={(e) => {
+                      const letter = encodeURIComponent((formData.name || 'P').charAt(0).toUpperCase());
+                      (e.target as HTMLImageElement).src = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%234f46e5"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="white" font-family="sans-serif" font-weight="bold" font-size="30">${letter}</text></svg>`;
+                    }}
+                  />
                 )}
                 <div>
                   <h4 className="font-extrabold text-slate-900 text-sm">{formData.name}</h4>
@@ -254,15 +364,24 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
         )}
 
         {/* Editable Form with Full Overrides */}
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4 max-h-[50vh] overflow-y-auto pr-1">
+        <form onSubmit={handleSubmit} noValidate className="mt-6 space-y-4 max-h-[50vh] overflow-y-auto pr-1">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Service / App Name *</label>
               <input
                 type="text"
-                required
                 value={formData.name || ''}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                onChange={(e) => {
+                  const newName = e.target.value;
+                  setSubmitError(null);
+                  setFormData(prev => ({
+                    ...prev,
+                    name: newName,
+                    cloaked_slug: !slugManuallyEdited
+                      ? newName.toLowerCase().trim().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+                      : prev.cloaked_slug
+                  }));
+                }}
                 placeholder="e.g. Cursor, Notion, Linear"
                 className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
               />
@@ -282,6 +401,7 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
                 <option value="E-Commerce">E-Commerce</option>
                 <option value="Finance & Crypto">Finance & Crypto</option>
                 <option value="Hosting & Cloud">Hosting & Cloud</option>
+                <option value="Security & Hardware">Security & Hardware</option>
                 <option value="Security">Security</option>
               </select>
             </div>
@@ -325,9 +445,12 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
                 </span>
                 <input
                   type="text"
-                  required
                   value={formData.cloaked_slug || ''}
-                  onChange={(e) => setFormData({ ...formData, cloaked_slug: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') })}
+                  onChange={(e) => {
+                    setSlugManuallyEdited(true);
+                    setSubmitError(null);
+                    setFormData({ ...formData, cloaked_slug: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') });
+                  }}
                   placeholder="cursor"
                   className="w-full px-3 py-2 rounded-r-xl bg-slate-50 border border-slate-300 text-indigo-700 font-mono text-xs font-bold focus:outline-none focus:border-indigo-600 focus:bg-white"
                 />
@@ -337,10 +460,14 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Destination Referral Link *</label>
               <input
-                type="url"
-                required
+                type="text"
                 value={formData.original_link || ''}
-                onChange={(e) => setFormData({ ...formData, original_link: e.target.value })}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSubmitError(null);
+                  setFormData({ ...formData, original_link: val });
+                  if (!inputUrl) setInputUrl(val);
+                }}
                 placeholder="https://..."
                 className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
               />
@@ -355,7 +482,7 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
                 {formData.logo_url && <span className="text-[10px] text-emerald-600 font-semibold">✓ Active</span>}
               </label>
               <input
-                type="url"
+                type="text"
                 value={formData.logo_url || ''}
                 onChange={(e) => setFormData({ ...formData, logo_url: e.target.value })}
                 placeholder="https://..."
@@ -369,7 +496,7 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
                 {formData.banner_url && <span className="text-[10px] text-emerald-600 font-semibold">✓ Active</span>}
               </label>
               <input
-                type="url"
+                type="text"
                 value={formData.banner_url || ''}
                 onChange={(e) => setFormData({ ...formData, banner_url: e.target.value })}
                 placeholder="https://..."
@@ -405,6 +532,13 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
             />
           </div>
 
+          {submitError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-semibold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{submitError}</span>
+            </div>
+          )}
+
           {/* Form Actions */}
           <div className="pt-4 border-t border-slate-200 flex justify-end gap-3">
             <button
@@ -420,7 +554,7 @@ export const AddProgramModal: React.FC<AddProgramModalProps> = ({
               className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs transition shadow-md shadow-indigo-600/20 flex items-center gap-2 cursor-pointer"
             >
               {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              <span>Publish Referral Program</span>
+              <span>{saving ? 'Publishing...' : 'Publish Referral Program'}</span>
             </button>
           </div>
         </form>

@@ -30,6 +30,12 @@ export default function App() {
   const [isFtcModalOpen, setIsFtcModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [activeLegalModal, setActiveLegalModal] = useState<'privacy' | 'terms' | 'contact' | null>(null);
+  const [toastNotification, setToastNotification] = useState<{
+    title: string;
+    subtitle: string;
+    slug?: string;
+  } | null>(null);
+  const [copiedToastSlug, setCopiedToastSlug] = useState(false);
 
   // Load programs on initial mount, track visitor, and verify active admin session
   useEffect(() => {
@@ -77,7 +83,18 @@ export default function App() {
   };
 
   const handleProgramAdded = (newProgram: AffiliateProgram) => {
-    setPrograms(prev => [newProgram, ...prev]);
+    setPrograms(prev => [newProgram, ...prev.filter(p => p.id !== newProgram.id)]);
+    api.getPrograms().then(fresh => {
+      if (fresh && fresh.length > 0) setPrograms(fresh);
+    });
+    setToastNotification({
+      title: `Referral Program Added: ${newProgram.name}`,
+      subtitle: `Published and live on the main directory at /go/${newProgram.cloaked_slug}`,
+      slug: newProgram.cloaked_slug
+    });
+    setTimeout(() => {
+      setToastNotification(prev => (prev?.slug === newProgram.cloaked_slug ? null : prev));
+    }, 8000);
   };
 
   const handleProgramUpdated = (updated: AffiliateProgram) => {
@@ -85,6 +102,12 @@ export default function App() {
     if (selectedProgram && selectedProgram.id === updated.id) {
       setSelectedProgram(updated);
     }
+    setToastNotification({
+      title: `Program Updated: ${updated.name}`,
+      subtitle: `Changes saved for /go/${updated.cloaked_slug}`,
+      slug: updated.cloaked_slug
+    });
+    setTimeout(() => setToastNotification(null), 5000);
   };
 
   const handleProgramDeleted = (id: string) => {
@@ -92,6 +115,11 @@ export default function App() {
     if (selectedProgram && selectedProgram.id === id) {
       setSelectedProgram(null);
     }
+    setToastNotification({
+      title: 'Referral Program Removed',
+      subtitle: 'The program has been deleted from the directory.'
+    });
+    setTimeout(() => setToastNotification(null), 4000);
   };
 
   const handleTrackClick = async (programId: string) => {
@@ -114,6 +142,51 @@ export default function App() {
         onOpenContactModal={() => setActiveLegalModal('contact')}
         needsReviewCount={needsReviewCount}
       />
+
+      {/* Global Confirmation Toast Banner */}
+      {toastNotification && (
+        <div className="bg-emerald-600 text-white px-4 py-3 shadow-lg border-b border-emerald-700 sticky top-16 z-40 animate-fade-in">
+          <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-white text-emerald-700 font-black text-xs shrink-0">
+                ✓
+              </span>
+              <div>
+                <p className="text-xs sm:text-sm font-extrabold">{toastNotification.title}</p>
+                <p className="text-[11px] text-emerald-100">{toastNotification.subtitle}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {toastNotification.slug && (
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/go/${toastNotification.slug}`);
+                    setCopiedToastSlug(true);
+                    setTimeout(() => setCopiedToastSlug(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition cursor-pointer"
+                >
+                  {copiedToastSlug ? '✓ Copied Link!' : 'Copy /go/ Link'}
+                </button>
+              )}
+              {currentView === 'admin' && (
+                <button
+                  onClick={() => setCurrentView('public')}
+                  className="px-3 py-1.5 rounded-lg bg-white text-emerald-800 hover:bg-emerald-50 text-xs font-extrabold transition cursor-pointer"
+                >
+                  View on Main Page →
+                </button>
+              )}
+              <button
+                onClick={() => setToastNotification(null)}
+                className="px-2 py-1 rounded-lg hover:bg-emerald-700 text-emerald-100 text-xs font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main View: Visitors see PublicDirectory; Admins can toggle between Public and Admin Hub */}
       <main className="flex-1">

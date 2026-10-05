@@ -18,6 +18,14 @@ function getAuthHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+function extractErrorMessage(data: any, fallback: string): string {
+  if (!data) return fallback;
+  if (typeof data.error === 'string') return data.error;
+  if (data.error && typeof data.error.message === 'string') return data.error.message;
+  if (typeof data.message === 'string') return data.message;
+  return fallback;
+}
+
 export const api = {
   // Authentication APIs
   async login(email: string, password: string): Promise<{ user: AdminUser; token: string }> {
@@ -114,7 +122,7 @@ export const api = {
       body: JSON.stringify(programData)
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to create program');
+    if (!res.ok) throw new Error(extractErrorMessage(data, 'Failed to create program'));
     return data.program;
   },
 
@@ -125,7 +133,7 @@ export const api = {
       body: JSON.stringify(updates)
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to update program');
+    if (!res.ok) throw new Error(extractErrorMessage(data, 'Failed to update program'));
     return data.program;
   },
 
@@ -135,7 +143,7 @@ export const api = {
       headers: getAuthHeader()
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to delete program');
+    if (!res.ok) throw new Error(extractErrorMessage(data, 'Failed to delete program'));
     return data.deletedId;
   },
 
@@ -150,7 +158,7 @@ export const api = {
       body: JSON.stringify({ url })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'AI Analysis failed');
+    if (!res.ok) throw new Error(extractErrorMessage(data, 'AI Analysis failed'));
     return data;
   },
 

@@ -11,26 +11,79 @@ export const setupSchema = z.object({
   name: z.string().trim().min(2, 'Name must be at least 2 characters long').default('Admin Owner'),
 });
 
+const normalizeUrl = (val: unknown) => {
+  if (typeof val !== 'string') return val;
+  const trimmed = val.trim();
+  if (!trimmed) return undefined;
+  if (!/^https?:\/\//i.test(trimmed)) return `https://${trimmed}`;
+  return trimmed;
+};
+
 export const programSchema = z.object({
-  name: z.string().trim().min(2, 'Program name is required'),
-  category: z.string().trim().min(2, 'Category is required'),
-  brand_domain: z.string().trim().min(3, 'Brand domain is required'),
-  affiliate_url: z.string().trim().url('Valid affiliate URL is required'),
-  destination_url: z.string().trim().url('Valid destination URL is required').optional(),
-  cloaked_slug: z.string().trim().min(2).regex(/^[a-z0-9_-]+$/i, 'Slug must contain only alphanumeric characters, dashes, or underscores'),
-  referral_perk: z.string().trim().optional(),
+  name: z.string().trim().min(1, 'Program name is required'),
+  category: z.string().trim().min(1, 'Category is required').default('AI Tools'),
+  brand_domain: z.string().trim().optional(),
+  original_link: z.preprocess(normalizeUrl, z.string().url('Valid referral URL is required').optional()),
+  affiliate_url: z.preprocess(normalizeUrl, z.string().url('Valid affiliate URL is required').optional()),
+  destination_url: z.preprocess(normalizeUrl, z.string().url('Valid destination URL is required').optional()),
+  cloaked_slug: z.string().trim().min(1, 'Cloaked slug is required').regex(/^[a-z0-9_-]+$/i, 'Slug must contain only letters, numbers, dashes, or underscores'),
+  referral_perk: z.string().trim().optional().default(''),
   description: z.string().trim().optional(),
+  ai_generated_pick: z.string().trim().optional(),
+  ai_description: z.string().trim().optional(),
+  ai_brief: z.string().trim().optional(),
   cta_label: z.string().trim().optional(),
   commission_type: z.enum(['recurring', 'flat', 'percentage', 'unverified']).default('unverified'),
   commission_value: z.string().nullable().optional(),
   commission_status: z.enum(['verified', 'unverified']).default('unverified'),
   cookie_duration: z.string().nullable().optional(),
-  status: z.enum(['active', 'paused', 'expired', 'disabled']).default('active'),
-  featured: z.boolean().default(false),
+  cookie_duration_days: z.number().int().positive().nullable().optional(),
+  status: z.enum(['active', 'needs_review', 'paused', 'expired', 'draft', 'manual_needed', 'disabled']).default('active'),
+  health_status: z.enum(['healthy', 'warning', 'broken', 'down', 'untested']).optional().default('healthy'),
+  featured: z.boolean().optional().default(true),
   logo_url: z.string().optional(),
+  banner_url: z.string().optional(),
+  key_selling_points: z.array(z.string()).optional(),
+  target_audience: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  manual_override_notes: z.string().optional(),
+}).refine((data) => Boolean(data.original_link || data.affiliate_url), {
+  message: 'A valid referral or destination link is required',
+  path: ['original_link'],
 });
 
-export const programUpdateSchema = programSchema.partial();
+export const programUpdateSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  brand_domain: z.string().trim().optional(),
+  original_link: z.preprocess(normalizeUrl, z.string().url().optional()),
+  affiliate_url: z.preprocess(normalizeUrl, z.string().url().optional()),
+  destination_url: z.preprocess(normalizeUrl, z.string().url().optional()),
+  cloaked_slug: z.string().trim().min(1).regex(/^[a-z0-9_-]+$/i).optional(),
+  referral_perk: z.string().trim().optional(),
+  description: z.string().trim().optional(),
+  ai_generated_pick: z.string().trim().optional(),
+  ai_description: z.string().trim().optional(),
+  ai_brief: z.string().trim().optional(),
+  cta_label: z.string().trim().optional(),
+  commission_type: z.enum(['recurring', 'flat', 'percentage', 'unverified']).optional(),
+  commission_value: z.string().nullable().optional(),
+  commission_status: z.enum(['verified', 'unverified']).optional(),
+  cookie_duration: z.string().nullable().optional(),
+  cookie_duration_days: z.number().int().positive().nullable().optional(),
+  status: z.enum(['active', 'needs_review', 'paused', 'expired', 'draft', 'manual_needed', 'disabled']).optional(),
+  health_status: z.enum(['healthy', 'warning', 'broken', 'down', 'untested']).optional(),
+  last_http_code: z.number().optional(),
+  last_response_time_ms: z.number().optional(),
+  last_checked: z.string().optional(),
+  featured: z.boolean().optional(),
+  logo_url: z.string().optional(),
+  banner_url: z.string().optional(),
+  key_selling_points: z.array(z.string()).optional(),
+  target_audience: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  manual_override_notes: z.string().optional(),
+});
 
 export const reviewSchema = z.object({
   program_id: z.string().trim().min(1, 'Program ID is required'),

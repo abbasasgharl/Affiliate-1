@@ -154,6 +154,21 @@ function decodeHtmlEntities(str: string): string {
     .trim();
 }
 
+// Helper: Strip generic affiliate/app subdomains to get the root brand domain
+function getRootDomain(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/^www\./, '');
+  const parts = host.split('.');
+  const genericPrefixes = new Set([
+    'try', 'app', 'get', 'use', 'join', 'go', 'my', 'auth', 'login', 'signup',
+    'dashboard', 'admin', 'portal', 'secure', 'cloud', 'partner', 'partners',
+    'ref', 'aff', 'link', 'track', 'r', 'buy', 'shop', 'store', 'links', 'promo'
+  ]);
+  if (parts.length >= 3 && genericPrefixes.has(parts[0])) {
+    return parts.slice(1).join('.');
+  }
+  return host;
+}
+
 // Helper: Extract true root brand and domain, ignoring generic prefixes
 function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
   brand: string;
@@ -164,21 +179,9 @@ function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
 } {
   try {
     const u = new URL(urlStr);
-    const host = u.hostname.toLowerCase().replace(/^www\./, '');
-    const parts = host.split('.');
-
-    const genericPrefixes = new Set([
-      'try', 'app', 'get', 'use', 'join', 'go', 'my', 'auth', 'login', 'signup',
-      'dashboard', 'admin', 'portal', 'secure', 'cloud', 'partner', 'partners',
-      'ref', 'aff', 'link', 'track', 'r', 'buy', 'shop', 'store'
-    ]);
-
-    let mainDomainPart = parts[0];
-    if (parts.length >= 3 && genericPrefixes.has(parts[0])) {
-      mainDomainPart = parts[1];
-    } else if (parts.length === 2) {
-      mainDomainPart = parts[0];
-    }
+    const rootDomain = getRootDomain(u.hostname);
+    const parts = rootDomain.split('.');
+    const mainDomainPart = parts[0] || 'partner';
 
     const cleanSlug = mainDomainPart.replace(/[^a-z0-9]/g, '').toLowerCase();
 
@@ -193,13 +196,15 @@ function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
       'semrush': { brand: 'Semrush', category: 'Marketing' },
       'shopify': { brand: 'Shopify', category: 'E-Commerce' },
       'ledger': { brand: 'Ledger', category: 'Security & Hardware' },
+      'partnerstack': { brand: 'PartnerStack', category: 'SaaS & Dev' },
+      'emergent': { brand: 'Emergent', category: 'AI Tools' },
     };
 
     if (knownBrands[cleanSlug]) {
       return {
         brand: knownBrands[cleanSlug].brand,
         cleanSlug,
-        brandDomain: host,
+        brandDomain: rootDomain,
         categoryHint: knownBrands[cleanSlug].category,
         detectedOffer: 'Special Partner Deal & Extended Trial'
       };
@@ -236,7 +241,7 @@ function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
     return {
       brand: detectedBrand,
       cleanSlug,
-      brandDomain: host,
+      brandDomain: rootDomain,
       categoryHint,
       detectedOffer
     };
@@ -248,6 +253,183 @@ function extractBrandAndDomain(urlStr: string, title?: string, desc?: string): {
       categoryHint: 'SaaS & Dev'
     };
   }
+}
+
+function parseHtmlMetadata(html: string, baseUrl: string): {
+  title: string;
+  description: string;
+  ogImage: string;
+  iconUrl: string;
+  textContent: string;
+} {
+  let title = '';
+  let description = '';
+  let ogImage = '';
+  let iconUrl = '';
+
+  const resolveHref = (raw: string) => {
+    try {
+      if (!raw) return '';
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('data:')) return '';
+      return new URL(trimmed, baseUrl).href;
+    } catch {
+      return '';
+    }
+  };
+
+  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  if (titleMatch) title = decodeHtmlEntities(titleMatch[1].trim());
+
+  const descMatch =
+    html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i) ||
+    html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:description["']/i);
+  if (descMatch) description = decodeHtmlEntities(descMatch[1].trim());
+
+  const ogImageMatch =
+    html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i) ||
+    html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']twitter:image["']/i);
+  if (ogImageMatch && ogImageMatch[1]) {
+    ogImage = resolveHref(ogImageMatch[1]);
+  }
+
+  // Extract <link> tags for apple-touch-icon or high-res icon
+  const linkTags = [...html.matchAll(/<link\b[^>]+>/gi)].map(m => m[0]);
+  let bestIconCandidate = '';
+  for (const tag of linkTags) {
+    const relMatch = tag.match(/rel=["']([^"']+)["']/i);
+    const hrefMatch = tag.match(/href=["']([^"']+)["']/i);
+    if (!relMatch || !hrefMatch) continue;
+    const rel = relMatch[1].toLowerCase();
+    const href = resolveHref(hrefMatch[1]);
+    if (!href) continue;
+
+    if (rel.includes('apple-touch-icon')) {
+      bestIconCandidate = href;
+      break; // apple-touch-icon is usually a crisp 180x180 PNG logo
+    }
+    if ((rel === 'icon' || rel === 'shortcut icon') && !bestIconCandidate) {
+      bestIconCandidate = href;
+    }
+    if (rel === 'icon' && (tag.includes('192x192') || tag.includes('180x180') || tag.includes('128x128') || tag.includes('64x64') || tag.includes('48x48'))) {
+      bestIconCandidate = href;
+    }
+  }
+  iconUrl = bestIconCandidate;
+
+  const textContent = html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .substring(0, 4000);
+
+  return { title, description, ogImage, iconUrl, textContent };
+}
+
+async function scrapeBrandPageAndAssets(normalizedUrl: string): Promise<{
+  finalUrl: string;
+  rootDomain: string;
+  scrapedTitle: string;
+  scrapedDescription: string;
+  scrapedContent: string;
+  logoUrl: string;
+  bannerUrl: string;
+  httpStatus: number;
+}> {
+  let finalUrl = normalizedUrl;
+  let scrapedTitle = '';
+  let scrapedDescription = '';
+  let scrapedContent = '';
+  let scrapedImage = '';
+  let scrapedIcon = '';
+  let httpStatus = 200;
+
+  const browserHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9'
+  };
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const pageRes = await fetch(normalizedUrl, {
+      headers: browserHeaders,
+      redirect: 'follow',
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    httpStatus = pageRes.status;
+    if (pageRes.url) finalUrl = pageRes.url;
+
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const parsed = parseHtmlMetadata(html, finalUrl);
+      scrapedTitle = parsed.title;
+      scrapedDescription = parsed.description;
+      scrapedImage = parsed.ogImage;
+      scrapedIcon = parsed.iconUrl;
+      scrapedContent = parsed.textContent;
+    }
+  } catch {
+    httpStatus = 0;
+  }
+
+  let rootDomain = 'partner.io';
+  try {
+    rootDomain = getRootDomain(new URL(finalUrl).hostname);
+  } catch {
+    try {
+      rootDomain = getRootDomain(new URL(normalizedUrl).hostname);
+    } catch {}
+  }
+
+  // If the affiliate link landed on a tracking subdomain or minimal app shell without og:image/icon,
+  // also inspect the root domain homepage (e.g., https://emergent.sh or https://partnerstack.com)
+  if ((!scrapedImage || !scrapedIcon || !scrapedDescription) && rootDomain && rootDomain !== 'partner.io') {
+    const rootHomeUrl = `https://${rootDomain}`;
+    try {
+      await validateSafeUrl(rootHomeUrl);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const rootRes = await fetch(rootHomeUrl, {
+        headers: browserHeaders,
+        redirect: 'follow',
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (rootRes.ok) {
+        const rootHtml = await rootRes.text();
+        const rootParsed = parseHtmlMetadata(rootHtml, rootRes.url || rootHomeUrl);
+        if (!scrapedIcon && rootParsed.iconUrl) scrapedIcon = rootParsed.iconUrl;
+        if (!scrapedImage && rootParsed.ogImage) scrapedImage = rootParsed.ogImage;
+        if (!scrapedTitle && rootParsed.title) scrapedTitle = rootParsed.title;
+        if (!scrapedDescription && rootParsed.description) scrapedDescription = rootParsed.description;
+        if (scrapedContent.length < 200 && rootParsed.textContent) scrapedContent = rootParsed.textContent;
+      }
+    } catch {}
+  }
+
+  const defaultFavicon = `https://www.google.com/s2/favicons?domain=${rootDomain}&sz=128`;
+  const logoUrl = scrapedIcon || defaultFavicon;
+  const defaultBanner = scrapedIcon || 'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=800&auto=format&fit=crop&q=80';
+  const bannerUrl = scrapedImage || defaultBanner;
+
+  return {
+    finalUrl,
+    rootDomain,
+    scrapedTitle,
+    scrapedDescription,
+    scrapedContent,
+    logoUrl,
+    bannerUrl,
+    httpStatus
+  };
 }
 
 // Helper: Dispatches email notification on referral click
@@ -618,7 +800,7 @@ app.post('/api/ai/analyze-link', requireAuth, rateLimit(20, 60000), async (req: 
     });
   }
 
-  // Duplicate Link Check in PostgreSQL
+  // Duplicate Link Check in PostgreSQL (informational warning rather than blocking)
   const existingPrograms = await db.getPrograms();
   const duplicate = existingPrograms.find(p => {
     try {
@@ -631,73 +813,22 @@ app.post('/api/ai/analyze-link', requireAuth, rateLimit(20, 60000), async (req: 
     }
   });
 
-  if (duplicate) {
-    return res.status(409).json({
-      error: 'Duplicate affiliate program detected!',
-      existingProgram: duplicate,
-      message: `A program for this target domain already exists: "${duplicate.name}" (/go/${duplicate.cloaked_slug}).`
-    });
-  }
-
-  // Scrape page content safely
-  let scrapedTitle = '';
-  let scrapedDescription = '';
-  let scrapedContent = '';
-  let scrapedImage = '';
-  let httpStatus = 200;
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-    const pageRes = await fetch(normalizedUrl, {
-      headers: {
-        'User-Agent': 'AffiliateOS-Bot/2.0 (+https://affiliateos.io/bot; security-verified)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-    httpStatus = pageRes.status;
-
-    if (pageRes.ok) {
-      const html = await pageRes.text();
-      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (titleMatch) scrapedTitle = titleMatch[1].trim();
-
-      const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
-                        html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i);
-      if (descMatch) scrapedDescription = descMatch[1].trim();
-
-      const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*)["']/i) ||
-                           html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']*)["']/i);
-      if (ogImageMatch && ogImageMatch[1]) {
-        let rawImg = ogImageMatch[1].trim();
-        if (rawImg.startsWith('//')) rawImg = 'https:' + rawImg;
-        if (rawImg.startsWith('http')) scrapedImage = rawImg;
-      }
-
-      scrapedContent = html
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .substring(0, 4000);
-    }
-  } catch {
-    httpStatus = 0;
-  }
+  // Scrape page content & brand assets safely (following redirects and checking root domain)
+  const {
+    finalUrl,
+    scrapedTitle,
+    scrapedDescription,
+    scrapedContent,
+    logoUrl: autoResolvedLogo,
+    bannerUrl: finalBanner,
+    httpStatus
+  } = await scrapeBrandPageAndAssets(normalizedUrl);
 
   const { brand: brandName, cleanSlug: candidateSlug, brandDomain, categoryHint, detectedOffer } = extractBrandAndDomain(
-    normalizedUrl,
+    finalUrl || normalizedUrl,
     scrapedTitle,
     scrapedDescription
   );
-
-  const autoResolvedLogo = `https://www.google.com/s2/favicons?domain=${brandDomain}&sz=128`;
-  const defaultBanner = 'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=800&auto=format&fit=crop&q=80';
-  const finalBanner = (scrapedImage && scrapedImage.startsWith('http')) ? scrapedImage : defaultBanner;
 
   // Use Gemini to analyze factual details
   try {
@@ -921,36 +1052,85 @@ app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), asy
   if (!parseResult.success) {
     return res.status(400).json({
       success: false,
-      error: { code: 'INVALID_INPUT', message: parseResult.error.issues[0]?.message || 'Invalid input.' }
+      error: parseResult.error.issues[0]?.message || 'Invalid input.'
     });
   }
 
   const pData = parseResult.data;
+  const targetUrl = (pData.original_link || pData.affiliate_url || '').trim();
+
+  let brandDomain = pData.brand_domain || 'partner.io';
+  if (!pData.brand_domain && targetUrl) {
+    try {
+      brandDomain = getRootDomain(new URL(targetUrl).hostname);
+    } catch {}
+  }
+
+  let resolvedLogo = pData.logo_url || '';
+  let resolvedBanner = pData.banner_url || '';
+  let resolvedDesc = pData.ai_description || pData.description || '';
+
+  const isDefaultFavicon = !resolvedLogo || resolvedLogo.includes('google.com/s2/favicons');
+  const isDefaultBanner =
+    !resolvedBanner ||
+    resolvedBanner.includes('photo-1555066931-4365d14bab8c') ||
+    resolvedBanner.includes('photo-1558494949-ef010cbdcc31');
+
+  if (targetUrl && (isDefaultFavicon || isDefaultBanner)) {
+    try {
+      await validateSafeUrl(targetUrl);
+      const scraped = await scrapeBrandPageAndAssets(targetUrl);
+      if (scraped.rootDomain && scraped.rootDomain !== 'partner.io') {
+        brandDomain = scraped.rootDomain;
+      }
+      if (isDefaultFavicon && scraped.logoUrl) {
+        resolvedLogo = scraped.logoUrl;
+      }
+      if (isDefaultBanner && scraped.bannerUrl) {
+        resolvedBanner = scraped.bannerUrl;
+      }
+      if (!resolvedDesc && scraped.scrapedDescription) {
+        resolvedDesc = scraped.scrapedDescription;
+      }
+    } catch {
+      // Fallback to rootDomain favicon below
+    }
+  }
+
+  if (!resolvedLogo) {
+    resolvedLogo = `https://www.google.com/s2/favicons?domain=${brandDomain}&sz=128`;
+  }
+  if (!resolvedBanner) {
+    resolvedBanner = resolvedLogo || 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80';
+  }
 
   try {
     const program: AffiliateProgram = {
       id: `prog_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       name: pData.name,
-      category: pData.category,
-      logo_url: pData.logo_url || `https://www.google.com/s2/favicons?domain=${pData.brand_domain}&sz=128`,
-      original_link: pData.affiliate_url,
+      category: pData.category || 'AI Tools',
+      logo_url: resolvedLogo,
+      banner_url: resolvedBanner,
+      original_link: targetUrl,
       cloaked_slug: pData.cloaked_slug.toLowerCase().trim(),
-      referral_perk: pData.referral_perk || '',
-      cta_label: pData.cta_label || `Claim ${pData.name} Deal`,
-      ai_generated_pick: pData.description || 'Verified Partner Program',
-      ai_description: pData.description || '',
-      ai_brief: pData.description || '',
-      commission_type: pData.commission_type as any,
+      referral_perk: pData.referral_perk || 'Special Referral Deal • Free Trial Included',
+      cta_label: pData.cta_label || `Try ${pData.name} Free`,
+      ai_generated_pick: pData.ai_generated_pick || pData.description || `Recommended Partner — ${pData.name}`,
+      ai_description: resolvedDesc || `Explore ${pData.name} through our verified partner referral link.`,
+      ai_brief: pData.ai_brief || resolvedDesc || `${pData.name} is a curated software solution in ${pData.category || 'AI Tools'}.`,
+      commission_type: (pData.commission_type as any) || 'unverified',
       commission_value: pData.commission_value || 'Not verified',
-      cookie_duration_days: pData.cookie_duration ? parseInt(pData.cookie_duration, 10) || 30 : 30,
-      status: pData.status as any,
-      health_status: 'healthy',
+      cookie_duration_days: pData.cookie_duration_days || (pData.cookie_duration ? parseInt(pData.cookie_duration, 10) || 60 : 60),
+      status: (pData.status as any) || 'active',
+      health_status: (pData.health_status as any) || 'healthy',
       last_http_code: 200,
       last_checked: new Date().toISOString(),
-      key_selling_points: ['Direct partner referral link', 'Monitored uptime', 'Tested destination'],
-      target_audience: 'Modern businesses and developers',
-      tags: [pData.category],
-      featured: pData.featured,
+      key_selling_points: pData.key_selling_points && pData.key_selling_points.length > 0
+        ? pData.key_selling_points
+        : ['Direct partner referral link', 'Monitored uptime', 'Tested destination'],
+      target_audience: pData.target_audience || 'Modern businesses, creators, and developers',
+      tags: pData.tags && pData.tags.length > 0 ? pData.tags : [pData.category || 'AI Tools', pData.name],
+      featured: pData.featured !== undefined ? pData.featured : true,
       date_added: new Date().toISOString()
     };
 

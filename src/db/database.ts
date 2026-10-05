@@ -229,113 +229,107 @@ export const postgresDb = {
       ? await db.select().from(affiliatePrograms).where(and(...conditions)).orderBy(desc(affiliatePrograms.createdAt))
       : await db.select().from(affiliatePrograms).orderBy(desc(affiliatePrograms.createdAt));
 
-    return rows.map(r => ({
+    return rows.map(r => this.mapRowToProgram(r));
+  },
+
+  mapRowToProgram(r: typeof affiliatePrograms.$inferSelect): AffiliateProgram {
+    let extraMeta: Record<string, any> = {};
+    if (r.affiliateNetwork && r.affiliateNetwork.startsWith('{')) {
+      try {
+        extraMeta = JSON.parse(r.affiliateNetwork);
+      } catch {
+        extraMeta = {};
+      }
+    }
+
+    const seedMatch = INITIAL_PROGRAMS.find(
+      s => s.id === r.id || s.cloaked_slug.toLowerCase() === r.slug.toLowerCase()
+    );
+
+    const stripSubdomain = (d: string) => {
+      const host = (d || '').toLowerCase().replace(/^www\./, '');
+      const parts = host.split('.');
+      const prefixes = new Set([
+        'try', 'app', 'get', 'use', 'join', 'go', 'my', 'auth', 'login', 'signup',
+        'dashboard', 'admin', 'portal', 'secure', 'cloud', 'partner', 'partners',
+        'ref', 'aff', 'link', 'track', 'r', 'buy', 'shop', 'store', 'links', 'promo'
+      ]);
+      if (parts.length >= 3 && prefixes.has(parts[0])) {
+        return parts.slice(1).join('.');
+      }
+      return host;
+    };
+
+    const rootDomain = stripSubdomain(r.brandDomain);
+    let cleanLogo = r.logoUrl || seedMatch?.logo_url || `https://www.google.com/s2/favicons?domain=${rootDomain}&sz=128`;
+    if (cleanLogo.includes('google.com/s2/favicons?domain=')) {
+      cleanLogo = `https://www.google.com/s2/favicons?domain=${rootDomain}&sz=128`;
+    }
+
+    return {
       id: r.id,
       name: r.name,
       category: r.category,
-      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
+      logo_url: cleanLogo,
+      banner_url: extraMeta.banner_url || seedMatch?.banner_url || undefined,
       original_link: r.affiliateUrl,
       cloaked_slug: r.slug,
-      referral_perk: r.referralPerk || '',
-      cta_label: `Claim ${r.name} Deal`,
-      ai_generated_pick: r.description,
-      ai_description: r.description,
-      ai_brief: r.description,
+      referral_perk: r.referralPerk || extraMeta.referral_perk || seedMatch?.referral_perk || '',
+      cta_label: extraMeta.cta_label || seedMatch?.cta_label || `Claim ${r.name} Deal`,
+      ai_generated_pick: extraMeta.ai_generated_pick || seedMatch?.ai_generated_pick || r.description,
+      ai_description: extraMeta.ai_description || r.description,
+      ai_brief: extraMeta.ai_brief || seedMatch?.ai_brief || r.description,
       commission_type: (r.commissionType as any) || 'unverified',
       commission_value: r.commissionValue || 'Not verified',
       cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
       status: (r.status as any) || 'active',
       health_status: (r.healthStatus as any) || 'healthy',
-      last_http_code: 200,
+      last_http_code: extraMeta.last_http_code || 200,
       last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
-      key_selling_points: [
-        'Direct verified partner connection',
-        'Transparent referral disclosure',
-        'Continuous uptime & link monitoring'
-      ],
-      target_audience: 'Modern businesses, developers, and tech professionals',
-      tags: [r.category, r.name],
+      key_selling_points: Array.isArray(extraMeta.key_selling_points) && extraMeta.key_selling_points.length > 0
+        ? extraMeta.key_selling_points
+        : seedMatch?.key_selling_points || [
+            'Direct verified partner connection',
+            'Transparent referral disclosure',
+            'Continuous uptime & link monitoring'
+          ],
+      target_audience: extraMeta.target_audience || seedMatch?.target_audience || 'Modern businesses, developers, and tech professionals',
+      tags: Array.isArray(extraMeta.tags) && extraMeta.tags.length > 0
+        ? extraMeta.tags
+        : seedMatch?.tags || [r.category, r.name],
       featured: r.featured,
       date_added: r.createdAt.toISOString()
-    }));
+    };
   },
 
   async getProgramById(id: string): Promise<AffiliateProgram | null> {
     const rows = await db.select().from(affiliatePrograms).where(eq(affiliatePrograms.id, id)).limit(1);
     if (rows.length === 0) return null;
-    const r = rows[0];
-    return {
-      id: r.id,
-      name: r.name,
-      category: r.category,
-      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
-      original_link: r.affiliateUrl,
-      cloaked_slug: r.slug,
-      referral_perk: r.referralPerk || '',
-      cta_label: `Claim ${r.name} Deal`,
-      ai_generated_pick: r.description,
-      ai_description: r.description,
-      ai_brief: r.description,
-      commission_type: (r.commissionType as any) || 'unverified',
-      commission_value: r.commissionValue || 'Not verified',
-      cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
-      status: (r.status as any) || 'active',
-      health_status: (r.healthStatus as any) || 'healthy',
-      last_http_code: 200,
-      last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
-      key_selling_points: [
-        'Direct verified partner connection',
-        'Transparent referral disclosure',
-        'Continuous uptime & link monitoring'
-      ],
-      target_audience: 'Modern businesses, developers, and tech professionals',
-      tags: [r.category, r.name],
-      featured: r.featured,
-      date_added: r.createdAt.toISOString()
-    };
+    return this.mapRowToProgram(rows[0]);
   },
 
   async getProgramBySlug(slug: string): Promise<AffiliateProgram | null> {
     const cleanSlug = slug.toLowerCase().trim();
     const rows = await db.select().from(affiliatePrograms).where(eq(affiliatePrograms.slug, cleanSlug)).limit(1);
     if (rows.length === 0) return null;
-    const r = rows[0];
-    return {
-      id: r.id,
-      name: r.name,
-      category: r.category,
-      logo_url: r.logoUrl || `https://www.google.com/s2/favicons?domain=${r.brandDomain}&sz=128`,
-      original_link: r.affiliateUrl,
-      cloaked_slug: r.slug,
-      referral_perk: r.referralPerk || '',
-      cta_label: `Claim ${r.name} Deal`,
-      ai_generated_pick: r.description,
-      ai_description: r.description,
-      ai_brief: r.description,
-      commission_type: (r.commissionType as any) || 'unverified',
-      commission_value: r.commissionValue || 'Not verified',
-      cookie_duration_days: r.cookieDuration ? parseInt(r.cookieDuration, 10) || 60 : 60,
-      status: (r.status as any) || 'active',
-      health_status: (r.healthStatus as any) || 'healthy',
-      last_http_code: 200,
-      last_checked: r.lastHealthCheck?.toISOString() || new Date().toISOString(),
-      key_selling_points: [
-        'Direct verified partner connection',
-        'Transparent referral disclosure',
-        'Continuous uptime & link monitoring'
-      ],
-      target_audience: 'Modern businesses, developers, and tech professionals',
-      tags: [r.category, r.name],
-      featured: r.featured,
-      date_added: r.createdAt.toISOString()
-    };
+    return this.mapRowToProgram(rows[0]);
   },
 
   async createProgram(program: AffiliateProgram): Promise<AffiliateProgram> {
-    const slug = (program.cloaked_slug || '').toLowerCase().trim();
-    const existing = await db.select({ id: affiliatePrograms.id }).from(affiliatePrograms).where(eq(affiliatePrograms.slug, slug)).limit(1);
-    if (existing.length > 0) {
-      throw new Error(`Cloaked slug "${slug}" is already in use.`);
+    let baseSlug = (program.cloaked_slug || program.name || 'deal')
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9_-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '') || 'deal';
+
+    let slug = baseSlug;
+    let suffix = 2;
+    while (true) {
+      const existing = await db.select({ id: affiliatePrograms.id }).from(affiliatePrograms).where(eq(affiliatePrograms.slug, slug)).limit(1);
+      if (existing.length === 0) break;
+      slug = `${baseSlug}-${suffix}`;
+      suffix++;
     }
 
     let brandDomain = 'partner.io';
@@ -345,24 +339,35 @@ export const postgresDb = {
 
     const id = program.id || `prog_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
+    const extraMeta = JSON.stringify({
+      banner_url: program.banner_url || '',
+      cta_label: program.cta_label || `Try ${program.name.trim()} Free`,
+      ai_generated_pick: program.ai_generated_pick || `Recommended Partner — ${program.name.trim()}`,
+      ai_description: program.ai_description || program.ai_brief || `${program.name.trim()} partner referral program.`,
+      ai_brief: program.ai_brief || program.ai_description || '',
+      key_selling_points: program.key_selling_points || [],
+      target_audience: program.target_audience || 'Modern teams, creators, and professionals',
+      tags: program.tags || [program.category || 'AI Tools', program.name.trim()]
+    });
+
     await db.insert(affiliatePrograms).values({
       id,
       slug,
       name: program.name.trim(),
-      description: program.ai_description || program.ai_brief || program.ai_generated_pick || '',
-      category: program.category || 'Tools',
+      description: program.ai_description || program.ai_brief || program.ai_generated_pick || `${program.name.trim()} partner referral program.`,
+      category: program.category || 'AI Tools',
       brandDomain,
       affiliateUrl: program.original_link,
       destinationUrl: program.original_link,
-      affiliateNetwork: 'Direct',
+      affiliateNetwork: extraMeta,
       commissionType: program.commission_type || 'unverified',
       commissionValue: program.commission_value || null,
       commissionStatus: program.commission_value && program.commission_value !== 'Not verified' ? 'verified' : 'unverified',
       cookieDuration: program.cookie_duration_days ? `${program.cookie_duration_days} days` : null,
       referralPerk: program.referral_perk || null,
       status: program.status || 'active',
-      featured: Boolean(program.featured),
-      logoUrl: program.logo_url || null,
+      featured: program.featured !== undefined ? Boolean(program.featured) : true,
+      logoUrl: program.logo_url || `https://www.google.com/s2/favicons?domain=${brandDomain}&sz=128`,
       verificationStatus: 'verified',
       lastVerifiedAt: new Date(),
       healthStatus: program.health_status || 'healthy',
@@ -387,7 +392,21 @@ export const postgresDb = {
       }
     }
 
-    const setValues: Record<string, any> = { updatedAt: new Date() };
+    const mergedMeta = JSON.stringify({
+      banner_url: updates.banner_url !== undefined ? updates.banner_url : existing.banner_url,
+      cta_label: updates.cta_label !== undefined ? updates.cta_label : existing.cta_label,
+      ai_generated_pick: updates.ai_generated_pick !== undefined ? updates.ai_generated_pick : existing.ai_generated_pick,
+      ai_description: updates.ai_description !== undefined ? updates.ai_description : existing.ai_description,
+      ai_brief: updates.ai_brief !== undefined ? updates.ai_brief : existing.ai_brief,
+      key_selling_points: updates.key_selling_points !== undefined ? updates.key_selling_points : existing.key_selling_points,
+      target_audience: updates.target_audience !== undefined ? updates.target_audience : existing.target_audience,
+      tags: updates.tags !== undefined ? updates.tags : existing.tags
+    });
+
+    const setValues: Record<string, any> = {
+      updatedAt: new Date(),
+      affiliateNetwork: mergedMeta
+    };
     if (updates.name !== undefined) setValues.name = updates.name;
     if (updates.category !== undefined) setValues.category = updates.category;
     if (updates.cloaked_slug !== undefined) setValues.slug = updates.cloaked_slug.toLowerCase().trim();

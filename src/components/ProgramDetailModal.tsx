@@ -151,7 +151,10 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
               alt={program.name}
               className="w-16 h-16 rounded-2xl object-contain p-1 border border-slate-200 shadow-sm bg-white"
               onError={(e) => {
-                (e.target as HTMLImageElement).src = `https://www.google.com/s2/favicons?domain=${program.cloaked_slug}.com&sz=128`;
+                const img = e.target as HTMLImageElement;
+                const letter = encodeURIComponent((program.name || 'P').charAt(0).toUpperCase());
+                img.onerror = null;
+                img.src = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%234f46e5"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="white" font-family="sans-serif" font-weight="bold" font-size="30">${letter}</text></svg>`;
               }}
             />
             <div>
