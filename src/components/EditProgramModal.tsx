@@ -4,9 +4,11 @@ import {
   Save,
   Trash2,
   Gift,
-  ExternalLink
+  ExternalLink,
+  Flame,
+  Plus
 } from 'lucide-react';
-import { AffiliateProgram, CommissionType, ProgramStatus } from '../types';
+import { AffiliateProgram, CommissionType, ProgramStatus, ProgramSubLink } from '../types';
 import { api } from '../services/api';
 
 interface EditProgramModalProps {
@@ -37,7 +39,22 @@ export const EditProgramModal: React.FC<EditProgramModalProps> = ({
     setSaving(true);
     setErrorMsg(null);
     try {
-      const updated = await api.updateProgram(program.id, formData);
+      const cleanedSubLinks: ProgramSubLink[] = (formData.additional_links || [])
+        .filter(l => l && l.url && l.url.trim().length > 0)
+        .slice(0, 2)
+        .map((l, idx) => {
+          let u = l.url.trim();
+          if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+          return {
+            label: (l.label || '').trim() || `${formData.name} Link ${idx + 2}`,
+            url: u
+          };
+        });
+
+      const updated = await api.updateProgram(program.id, {
+        ...formData,
+        additional_links: cleanedSubLinks
+      });
       onProgramUpdated(updated);
       onClose();
     } catch (err: any) {
@@ -82,6 +99,28 @@ export const EditProgramModal: React.FC<EditProgramModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-4 max-h-[65vh] overflow-y-auto pr-1">
+          {/* Featured / Pin to Top Toggle */}
+          <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <Flame className="w-4 h-4 fill-amber-500 text-amber-600" />
+              </div>
+              <div>
+                <p className="text-xs font-extrabold text-slate-900">Feature Program (Keep Pinned at Top)</p>
+                <p className="text-[11px] text-slate-600">Featured programs stay at the top of the directory instead of moving down</p>
+              </div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(formData.featured)}
+                onChange={(e) => setFormData({ ...formData, featured: e.target.checked })}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Service Name</label>
@@ -173,7 +212,7 @@ export const EditProgramModal: React.FC<EditProgramModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Destination Referral URL</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Destination Referral URL #1 (Primary)</label>
               <input
                 type="url"
                 required
@@ -182,6 +221,96 @@ export const EditProgramModal: React.FC<EditProgramModalProps> = ({
                 className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
               />
             </div>
+          </div>
+
+          {/* Up to 3 Referral Links Builder */}
+          <div className="p-4 rounded-2xl bg-indigo-50/40 border border-indigo-100 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-extrabold text-slate-900 flex items-center gap-1.5">
+                  <ExternalLink className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Multiple Referral Links ({1 + (formData.additional_links?.length || 0)} / 3 Links)</span>
+                </h4>
+                <p className="text-[11px] text-slate-500">
+                  Add up to 3 different referral links for this program to display on its card.
+                </p>
+              </div>
+              {(formData.additional_links?.length || 0) < 2 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const current = formData.additional_links || [];
+                    if (current.length >= 2) return;
+                    const nextNum = current.length + 2;
+                    setFormData({
+                      ...formData,
+                      additional_links: [
+                        ...current,
+                        { label: nextNum === 2 ? 'Special Offer / Link #2' : 'Bonus Deal / Link #3', url: '' }
+                      ]
+                    });
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer shadow-2xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Link #{(formData.additional_links?.length || 0) + 2}</span>
+                </button>
+              )}
+            </div>
+
+            {formData.additional_links && formData.additional_links.length > 0 && (
+              <div className="space-y-2.5 pt-1">
+                {formData.additional_links.map((subLink, index) => (
+                  <div key={index} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center bg-white p-2.5 rounded-xl border border-slate-200">
+                    <div className="sm:col-span-4">
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">
+                        Link #{index + 2} Button Label
+                      </label>
+                      <input
+                        type="text"
+                        value={subLink.label}
+                        onChange={(e) => {
+                          const updated = [...(formData.additional_links || [])];
+                          updated[index] = { ...updated[index], label: e.target.value };
+                          setFormData({ ...formData, additional_links: updated });
+                        }}
+                        placeholder={`e.g. Claim Deal #${index + 2}`}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:bg-white"
+                      />
+                    </div>
+                    <div className="sm:col-span-7">
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">
+                        Link #{index + 2} Referral URL (/go/{formData.cloaked_slug}?link={index + 2})
+                      </label>
+                      <input
+                        type="text"
+                        value={subLink.url}
+                        onChange={(e) => {
+                          const updated = [...(formData.additional_links || [])];
+                          updated[index] = { ...updated[index], url: e.target.value };
+                          setFormData({ ...formData, additional_links: updated });
+                        }}
+                        placeholder="https://..."
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-300 text-slate-900 text-xs font-mono focus:outline-none focus:border-indigo-600 focus:bg-white"
+                      />
+                    </div>
+                    <div className="sm:col-span-1 flex justify-end sm:pt-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = (formData.additional_links || []).filter((_, i) => i !== index);
+                          setFormData({ ...formData, additional_links: updated });
+                        }}
+                        title="Remove this link"
+                        className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Logo & Banner URLs */}

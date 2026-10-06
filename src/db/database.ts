@@ -229,7 +229,15 @@ export const postgresDb = {
       ? await db.select().from(affiliatePrograms).where(and(...conditions)).orderBy(desc(affiliatePrograms.createdAt))
       : await db.select().from(affiliatePrograms).orderBy(desc(affiliatePrograms.createdAt));
 
-    return rows.map(r => this.mapRowToProgram(r));
+    const mapped = rows.map(r => this.mapRowToProgram(r));
+    return mapped.sort((a, b) => {
+      if (a.featured && !b.featured) return -1;
+      if (!a.featured && b.featured) return 1;
+      const orderA = typeof a.sort_order === 'number' ? a.sort_order : 999999;
+      const orderB = typeof b.sort_order === 'number' ? b.sort_order : 999999;
+      if (orderA !== orderB) return orderA - orderB;
+      return new Date(b.date_added).getTime() - new Date(a.date_added).getTime();
+    });
   },
 
   mapRowToProgram(r: typeof affiliatePrograms.$inferSelect): AffiliateProgram {
@@ -274,6 +282,8 @@ export const postgresDb = {
       banner_url: extraMeta.banner_url || seedMatch?.banner_url || undefined,
       original_link: r.affiliateUrl,
       cloaked_slug: r.slug,
+      additional_links: Array.isArray(extraMeta.additional_links) ? extraMeta.additional_links : [],
+      sort_order: typeof extraMeta.sort_order === 'number' ? extraMeta.sort_order : undefined,
       referral_perk: r.referralPerk || extraMeta.referral_perk || seedMatch?.referral_perk || '',
       cta_label: extraMeta.cta_label || seedMatch?.cta_label || `Claim ${r.name} Deal`,
       ai_generated_pick: extraMeta.ai_generated_pick || seedMatch?.ai_generated_pick || r.description,
@@ -347,7 +357,9 @@ export const postgresDb = {
       ai_brief: program.ai_brief || program.ai_description || '',
       key_selling_points: program.key_selling_points || [],
       target_audience: program.target_audience || 'Modern teams, creators, and professionals',
-      tags: program.tags || [program.category || 'AI Tools', program.name.trim()]
+      tags: program.tags || [program.category || 'AI Tools', program.name.trim()],
+      additional_links: Array.isArray(program.additional_links) ? program.additional_links.slice(0, 2) : [],
+      sort_order: typeof program.sort_order === 'number' ? program.sort_order : 0
     });
 
     await db.insert(affiliatePrograms).values({
@@ -400,7 +412,9 @@ export const postgresDb = {
       ai_brief: updates.ai_brief !== undefined ? updates.ai_brief : existing.ai_brief,
       key_selling_points: updates.key_selling_points !== undefined ? updates.key_selling_points : existing.key_selling_points,
       target_audience: updates.target_audience !== undefined ? updates.target_audience : existing.target_audience,
-      tags: updates.tags !== undefined ? updates.tags : existing.tags
+      tags: updates.tags !== undefined ? updates.tags : existing.tags,
+      additional_links: updates.additional_links !== undefined ? updates.additional_links : (existing.additional_links || []),
+      sort_order: updates.sort_order !== undefined ? updates.sort_order : existing.sort_order
     });
 
     const setValues: Record<string, any> = {
@@ -426,6 +440,18 @@ export const postgresDb = {
     await db.update(affiliatePrograms).set(setValues).where(eq(affiliatePrograms.id, id));
     const updated = await this.getProgramById(id);
     return updated!;
+  },
+
+  async reorderPrograms(orderedIds: string[]): Promise<AffiliateProgram[]> {
+    const allPrograms = await this.getPrograms();
+    const mapById = new Map(allPrograms.map(p => [p.id, p]));
+    for (let i = 0; i < orderedIds.length; i++) {
+      const id = orderedIds[i];
+      if (mapById.has(id)) {
+        await this.updateProgram(id, { sort_order: i + 1 });
+      }
+    }
+    return this.getPrograms();
   },
 
   async deleteProgram(id: string): Promise<boolean> {

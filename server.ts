@@ -614,10 +614,19 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
     `);
   }
 
+  // Determine target destination URL (supports ?link=1, ?link=2, ?link=3 for up to 3 links per program)
+  const linkIdx = parseInt(req.query.link as string, 10);
+  let targetDestination = program.original_link;
+  if (linkIdx === 2 && program.additional_links?.[0]?.url) {
+    targetDestination = program.additional_links[0].url;
+  } else if (linkIdx === 3 && program.additional_links?.[1]?.url) {
+    targetDestination = program.additional_links[1].url;
+  }
+
   // If in Preview Mode: DO NOT record click in PostgreSQL (Section 13)
   if (isPreview) {
     res.setHeader('X-Preview-Mode', '1');
-    return res.redirect(302, program.original_link);
+    return res.redirect(302, targetDestination);
   }
 
   // Record exactly ONE authoritative click in PostgreSQL (Section 12)
@@ -657,7 +666,7 @@ app.get('/go/:slug', async (req: Request, res: Response) => {
   dispatchClickNotification(program, click).catch(() => {});
 
   // High Performance 302 HTTP Redirect directly to verified affiliate URL
-  res.redirect(302, program.original_link);
+  res.redirect(302, targetDestination);
 });
 
 // -----------------------------------------------------------------------------
@@ -1113,6 +1122,8 @@ app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), asy
       banner_url: resolvedBanner,
       original_link: targetUrl,
       cloaked_slug: pData.cloaked_slug.toLowerCase().trim(),
+      additional_links: pData.additional_links || [],
+      sort_order: typeof pData.sort_order === 'number' ? pData.sort_order : 0,
       referral_perk: pData.referral_perk || 'Special Referral Deal • Free Trial Included',
       cta_label: pData.cta_label || `Try ${pData.name} Free`,
       ai_generated_pick: pData.ai_generated_pick || pData.description || `Recommended Partner — ${pData.name}`,
@@ -1139,6 +1150,20 @@ app.post('/api/programs', requireAuth, requireRole('super_admin', 'editor'), asy
     res.status(201).json({ success: true, program: created });
   } catch (err: any) {
     res.status(409).json({ error: err.message });
+  }
+});
+
+app.post('/api/programs/reorder', requireAuth, requireRole('super_admin', 'editor'), async (req: Request, res: Response) => {
+  const { orderedIds } = req.body;
+  if (!Array.isArray(orderedIds)) {
+    return res.status(400).json({ error: 'orderedIds array is required' });
+  }
+  try {
+    const programs = await db.reorderPrograms(orderedIds);
+    await db.logAuditEvent(req.user!.userId, req.user!.email, 'reorder_programs', 'program');
+    res.json({ success: true, programs });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
   }
 });
 

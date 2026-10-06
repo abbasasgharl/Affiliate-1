@@ -4,6 +4,11 @@ export type ProgramStatus = 'active' | 'needs_review' | 'paused' | 'expired' | '
 
 export type HealthStatus = 'healthy' | 'warning' | 'broken' | 'down' | 'untested';
 
+export interface ProgramSubLink {
+  label: string;
+  url: string;
+}
+
 export interface AffiliateProgram {
   id: string;
   name: string;
@@ -12,6 +17,8 @@ export interface AffiliateProgram {
   banner_url?: string;
   original_link: string;
   cloaked_slug: string;
+  additional_links?: ProgramSubLink[];
+  sort_order?: number;
   
   // Promotional & Referral Call-to-Action
   referral_perk?: string;    // e.g. "Exclusive: Free 14-Day Pro Trial + 20% Off"

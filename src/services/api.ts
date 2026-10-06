@@ -147,6 +147,17 @@ export const api = {
     return data.deletedId;
   },
 
+  async reorderPrograms(orderedIds: string[]): Promise<AffiliateProgram[]> {
+    const res = await fetch('/api/programs/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ orderedIds })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(extractErrorMessage(data, 'Failed to reorder programs'));
+    return data.programs;
+  },
+
   async analyzeLinkWithAI(url: string): Promise<{
     program: Partial<AffiliateProgram>;
     botBlocked?: boolean;

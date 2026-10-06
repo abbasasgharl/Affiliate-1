@@ -471,8 +471,8 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
             </button>
           </div>
 
-          {/* Primary High-Converting CTA Button */}
-          <div className="pt-2">
+          {/* Primary High-Converting CTA Button & Additional Links */}
+          <div className="pt-2 space-y-2.5">
             <button
               onClick={handleCtaClick}
               className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-cyan-600 hover:from-indigo-700 hover:to-cyan-700 text-white font-extrabold text-base transition-all shadow-xl shadow-indigo-600/25 flex items-center justify-center gap-2 group cursor-pointer"
@@ -480,6 +480,22 @@ export const ProgramDetailModal: React.FC<ProgramDetailModalProps> = ({
               <span>{program.cta_label || `Visit Official ${program.name} Referral Site`}</span>
               <ExternalLink className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
             </button>
+
+            {program.additional_links && program.additional_links.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {program.additional_links.slice(0, 2).map((sub, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => window.open(`/go/${program.cloaked_slug}?link=${idx + 2}`, '_blank', 'noopener,noreferrer')}
+                    className="w-full py-3 px-4 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 font-extrabold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <span>{sub.label || `${program.name} Link #${idx + 2}`}</span>
+                    <ExternalLink className="w-4 h-4 shrink-0" />
+                  </button>
+                ))}
+              </div>
+            )}
+
             <p className="text-[11px] text-center text-slate-400 mt-2">
               FTC Disclosure: Clicking this link routes to the official partner page. We may receive a referral commission at zero additional cost to you.
             </p>

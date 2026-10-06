@@ -19,6 +19,11 @@ const normalizeUrl = (val: unknown) => {
   return trimmed;
 };
 
+const subLinkSchema = z.object({
+  label: z.string().trim().min(1, 'Link label is required'),
+  url: z.preprocess(normalizeUrl, z.string().url('Valid URL is required'))
+});
+
 export const programSchema = z.object({
   name: z.string().trim().min(1, 'Program name is required'),
   category: z.string().trim().min(1, 'Category is required').default('AI Tools'),
@@ -27,6 +32,8 @@ export const programSchema = z.object({
   affiliate_url: z.preprocess(normalizeUrl, z.string().url('Valid affiliate URL is required').optional()),
   destination_url: z.preprocess(normalizeUrl, z.string().url('Valid destination URL is required').optional()),
   cloaked_slug: z.string().trim().min(1, 'Cloaked slug is required').regex(/^[a-z0-9_-]+$/i, 'Slug must contain only letters, numbers, dashes, or underscores'),
+  additional_links: z.array(subLinkSchema).max(2).optional().default([]),
+  sort_order: z.number().int().optional(),
   referral_perk: z.string().trim().optional().default(''),
   description: z.string().trim().optional(),
   ai_generated_pick: z.string().trim().optional(),
@@ -60,6 +67,8 @@ export const programUpdateSchema = z.object({
   affiliate_url: z.preprocess(normalizeUrl, z.string().url().optional()),
   destination_url: z.preprocess(normalizeUrl, z.string().url().optional()),
   cloaked_slug: z.string().trim().min(1).regex(/^[a-z0-9_-]+$/i).optional(),
+  additional_links: z.array(subLinkSchema).max(2).optional(),
+  sort_order: z.number().int().optional(),
   referral_perk: z.string().trim().optional(),
   description: z.string().trim().optional(),
   ai_generated_pick: z.string().trim().optional(),

@@ -36,7 +36,11 @@ import {
   ChevronRight,
   Server,
   Key,
-  EyeOff
+  EyeOff,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
+  Flame
 } from 'lucide-react';
 import {
   AffiliateProgram,
@@ -86,6 +90,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchFilter, setSearchFilter] = useState('');
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
+  const [draggedProgramId, setDraggedProgramId] = useState<string | null>(null);
+  const [dragOverProgramId, setDragOverProgramId] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
 
   const [bulkInput, setBulkInput] = useState('');
   const [bulkQueue, setBulkQueue] = useState<BulkImportItem[]>([]);
@@ -424,6 +431,85 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       onProgramsUpdated(programs.map(p => p.id === updated.id ? updated : p));
     } catch (err: any) {
       alert(err.message || 'Failed to toggle program status');
+    }
+  };
+
+  const handleToggleFeatured = async (program: AffiliateProgram) => {
+    const nextFeatured = !program.featured;
+    try {
+      const updated = await api.updateProgram(program.id, { featured: nextFeatured });
+      const refreshed = await api.getPrograms();
+      onProgramsUpdated(refreshed.length > 0 ? refreshed : programs.map(p => p.id === updated.id ? updated : p));
+    } catch (err: any) {
+      console.error('Failed to toggle featured:', err);
+    }
+  };
+
+  const handleMoveProgram = async (programId: string, direction: 'up' | 'down') => {
+    const idx = programs.findIndex(p => p.id === programId);
+    if (idx === -1) return;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= programs.length) return;
+
+    const reordered = [...programs];
+    const [moved] = reordered.splice(idx, 1);
+    reordered.splice(targetIdx, 0, moved);
+
+    // Ensure moved program matches featured status of neighbor if crossing boundary
+    const neighbor = programs[targetIdx];
+    if (neighbor && Boolean(moved.featured) !== Boolean(neighbor.featured)) {
+      await api.updateProgram(moved.id, { featured: Boolean(neighbor.featured) });
+      moved.featured = Boolean(neighbor.featured);
+    }
+
+    onProgramsUpdated(reordered);
+    setReordering(true);
+    try {
+      const updatedList = await api.reorderPrograms(reordered.map(p => p.id));
+      onProgramsUpdated(updatedList);
+    } catch (err) {
+      console.error('Failed to reorder programs:', err);
+    } finally {
+      setReordering(false);
+    }
+  };
+
+  const handleDropProgram = async (targetProgramId: string) => {
+    if (!draggedProgramId || draggedProgramId === targetProgramId) {
+      setDraggedProgramId(null);
+      setDragOverProgramId(null);
+      return;
+    }
+    const fromIdx = programs.findIndex(p => p.id === draggedProgramId);
+    const toIdx = programs.findIndex(p => p.id === targetProgramId);
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggedProgramId(null);
+      setDragOverProgramId(null);
+      return;
+    }
+
+    const reordered = [...programs];
+    const [moved] = reordered.splice(fromIdx, 1);
+    const targetProg = programs[toIdx];
+    reordered.splice(toIdx, 0, moved);
+
+    setDraggedProgramId(null);
+    setDragOverProgramId(null);
+
+    if (targetProg && Boolean(moved.featured) !== Boolean(targetProg.featured)) {
+      await api.updateProgram(moved.id, { featured: Boolean(targetProg.featured) });
+      moved.featured = Boolean(targetProg.featured);
+    }
+
+    onProgramsUpdated(reordered);
+    setReordering(true);
+    try {
+      const updatedList = await api.reorderPrograms(reordered.map(p => p.id));
+      onProgramsUpdated(updatedList);
+    } catch (err) {
+      console.error('Failed to save dragged order:', err);
+    } finally {
+      setReordering(false);
     }
   };
 
@@ -906,8 +992,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               </select>
             </div>
 
-            <div className="text-xs text-slate-500 font-semibold self-end sm:self-auto">
-              Showing <strong>{filteredPrograms.length}</strong> of {programs.length} programs
+            <div className="flex items-center gap-3 self-end sm:self-auto">
+              <span className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg font-bold">
+                {reordering ? 'Saving new order...' : '💡 Drag rows or use ↑↓ arrows to reorder programs'}
+              </span>
+              <div className="text-xs text-slate-500 font-semibold">
+                Showing <strong>{filteredPrograms.length}</strong> of {programs.length} programs
+              </div>
             </div>
           </div>
 
@@ -916,9 +1007,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               <table className="w-full text-left text-xs text-slate-700">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                   <tr>
+                    <th className="py-3.5 px-3 w-20">Order</th>
                     <th className="py-3.5 px-4">Program & Cover</th>
+                    <th className="py-3.5 px-4">Featured (Top)</th>
                     <th className="py-3.5 px-4">Referral Perk</th>
-                    <th className="py-3.5 px-4">Cloaked Route</th>
+                    <th className="py-3.5 px-4">Cloaked Route & Links</th>
                     <th className="py-3.5 px-4">Health</th>
                     <th className="py-3.5 px-4">Status</th>
                     <th className="py-3.5 px-4 text-right">Actions</th>
@@ -927,8 +1020,71 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPrograms.map((program) => {
                     const cloakedUrl = `${window.location.origin}/go/${program.cloaked_slug}`;
+                    const globalIdx = programs.findIndex(p => p.id === program.id);
+                    const totalLinksCount = 1 + (program.additional_links?.length || 0);
+                    const isDragged = draggedProgramId === program.id;
+                    const isDragOver = dragOverProgramId === program.id;
                     return (
-                      <tr key={program.id} className="hover:bg-slate-50/80 transition">
+                      <tr
+                        key={program.id}
+                        draggable
+                        onDragStart={() => setDraggedProgramId(program.id)}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          if (dragOverProgramId !== program.id) {
+                            setDragOverProgramId(program.id);
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverProgramId === program.id) {
+                            setDragOverProgramId(null);
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          handleDropProgram(program.id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedProgramId(null);
+                          setDragOverProgramId(null);
+                        }}
+                        className={`transition ${
+                          isDragged ? 'opacity-40 bg-indigo-50' :
+                          isDragOver ? 'bg-indigo-50/90 border-t-2 border-indigo-500' :
+                          'hover:bg-slate-50/80'
+                        }`}
+                      >
+                        <td className="py-3.5 px-3">
+                          <div className="flex items-center gap-1">
+                            <span
+                              title="Drag row to reorder"
+                              className="p-1 text-slate-400 hover:text-slate-700 cursor-grab active:cursor-grabbing"
+                            >
+                              <GripVertical className="w-4 h-4" />
+                            </span>
+                            <div className="flex flex-col gap-0.5">
+                              <button
+                                type="button"
+                                disabled={globalIdx <= 0 || reordering}
+                                onClick={() => handleMoveProgram(program.id, 'up')}
+                                title="Move Program Up"
+                                className="p-0.5 rounded hover:bg-slate-200 disabled:opacity-30 text-slate-600 cursor-pointer"
+                              >
+                                <ArrowUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={globalIdx === -1 || globalIdx >= programs.length - 1 || reordering}
+                                onClick={() => handleMoveProgram(program.id, 'down')}
+                                title="Move Program Down"
+                                className="p-0.5 rounded hover:bg-slate-200 disabled:opacity-30 text-slate-600 cursor-pointer"
+                              >
+                                <ArrowDown className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+
                         <td className="py-3.5 px-4">
                           <div className="flex items-center gap-3">
                             <img
@@ -936,7 +1092,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                               alt={program.name}
                               className="w-10 h-10 rounded-xl object-contain p-1 bg-white border border-slate-200 shadow-2xs"
                               onError={(e) => {
-                                (e.target as HTMLImageElement).src = `https://www.google.com/s2/favicons?domain=${program.cloaked_slug}.com&sz=128`;
+                                const img = e.target as HTMLImageElement;
+                                const letter = encodeURIComponent((program.name || 'P').charAt(0).toUpperCase());
+                                img.onerror = null;
+                                img.src = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%234f46e5"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="white" font-family="sans-serif" font-weight="bold" font-size="30">${letter}</text></svg>`;
                               }}
                             />
                             <div>
@@ -946,6 +1105,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                               <span className="text-[11px] text-slate-500 font-medium">{program.category}</span>
                             </div>
                           </div>
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleFeatured(program)}
+                            title={program.featured ? 'Pinned as Featured at top (Click to unpin)' : 'Click to Feature & Pin to Top'}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-extrabold transition cursor-pointer border ${
+                              program.featured
+                                ? 'bg-amber-50 text-amber-800 border-amber-300 shadow-2xs'
+                                : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'
+                            }`}
+                          >
+                            <Flame className={`w-3.5 h-3.5 ${program.featured ? 'fill-amber-500 text-amber-600' : 'text-slate-400'}`} />
+                            <span>{program.featured ? 'Featured' : 'Standard'}</span>
+                          </button>
                         </td>
 
                         <td className="py-3.5 px-4">
@@ -960,28 +1135,35 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         </td>
 
                         <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-1.5 font-mono text-xs">
-                            <span className="text-indigo-700 font-bold">/go/{program.cloaked_slug}</span>
-                            <button
-                              onClick={() => {
-                                navigator.clipboard.writeText(cloakedUrl);
-                                setCopiedSlug(program.id);
-                                setTimeout(() => setCopiedSlug(null), 2000);
-                              }}
-                              className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
-                              title="Copy cloaked redirect URL"
-                            >
-                              {copiedSlug === program.id ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                            </button>
-                            <a
-                              href={`/go/${program.cloaked_slug}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
-                              title="Test redirect in new tab"
-                            >
-                              <ExternalLink className="w-3.5 h-3.5" />
-                            </a>
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5 font-mono text-xs">
+                              <span className="text-indigo-700 font-bold">/go/{program.cloaked_slug}</span>
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(cloakedUrl);
+                                  setCopiedSlug(program.id);
+                                  setTimeout(() => setCopiedSlug(null), 2000);
+                                }}
+                                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                                title="Copy cloaked redirect URL"
+                              >
+                                {copiedSlug === program.id ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                              </button>
+                              <a
+                                href={`/go/${program.cloaked_slug}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                                title="Test redirect in new tab"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            </div>
+                            {totalLinksCount > 1 && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 font-bold text-[10px]">
+                                {totalLinksCount} Links on Card
+                              </span>
+                            )}
                           </div>
                         </td>
 
